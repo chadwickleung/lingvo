@@ -60,6 +60,8 @@ class BaseRunner:
     self._verbose_enqueue_logging = False
 
     self._params = trial.OverrideModelParams(p)
+
+    # This is the long list of model configs
     tf.logging.info('=' * 60)
     for line in self.params.ToText().split('\n'):
       tf.logging.info('%s', line)
