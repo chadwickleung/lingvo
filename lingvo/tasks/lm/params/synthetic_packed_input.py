@@ -90,6 +90,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
         dtype=tf.float32,
         fprop_dtype=tf.bfloat16,
         name='transformer',
+        
         builder=gshard_builder.DenseBuilder.Params().Set(
             device_mesh_shape=self.DEVICE_MESH_SHAPE,
             device_mesh=self.DEVICE_MESH,
@@ -111,6 +112,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             attention_num_heads=self.NUM_HEADS,
             ff_dim=self.HIDDEN_DIM,
             attention_combine_dims=True),
+
         batch_size=batch_size_per_tf_replica,
         sequence_length=self.SEQUENCE_LENGTH,
         num_transformer_layers=self.NUM_TRANSFORMER_LAYERS,

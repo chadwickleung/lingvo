@@ -70,12 +70,16 @@ def GetExecutorParams(model_name, cluster_params, model_registry):
   ps_params_dict = {}
   with cluster_factory.Cluster(cluster_params):
     ps_cfg = model_registry.GetProgramSchedule(model_name)
+    tf.logging.info('Got program schedule')
+
+    # get train_cfg, where train_cfg is a p and p.task == what returned by Task()
     train_cfg = model_registry.GetParams(model_name, 'Train')
     train_cfg.cluster = cluster_params
 
     # Remove misleading train params
     train_cfg = UnsetUnusedTrainParams(train_cfg)
 
+    # NOT a MultiTaskModel
     if issubclass(train_cfg.cls, base_model.MultiTaskModel):
       multi_task_train_cfg = train_cfg
 
@@ -142,8 +146,13 @@ def GetExecutorParams(model_name, cluster_params, model_registry):
             train_cfg.task.train.ema_decay_moving_vars)
 
       program_schedule_params = ps_cfg
+
+      # {'Train', p}, where p.task == what returned by Task()
       program_schedule_params.task_dict = {'Train': train_cfg}
       for eval_dataset_name in program_schedule_params.dataset_names:
+        # expected no eval dataset as ProgramSchedule defined empty 
+        # eval_dataset_names
+        tf.logging.info('program schedule has dataset')
         task_eval_params = model_registry.GetParams(model_name,
                                                     eval_dataset_name)
         task_eval_params = UnsetUnusedTrainParams(task_eval_params)
@@ -171,12 +180,15 @@ class ExecutorTpu(base_runner.BaseRunner):
     """Construct an ExecutorTpu BaseRunner.
 
     Args:
-      train_cfg: SingleTaskModelParams or MultiTaskModelParams
+      train_cfg: SingleTaskModelParams or MultiTaskModelParams, where 
+        train_cfg.task == what returned by Task()
       ps_params_dict: A dict of top-level task name -> ProgramSchedule params,
-        if train_cfg is a SingleTaskModelParams, we expect only one entry.
+        if train_cfg is a SingleTaskModelParams, we expect only one entry,
+        where {'': ps_param}
       *args: List args to pass through to BaseRunner.
       **kwargs: keyword args to pass through to BaseRunner.
     """
+    # Set-ed EagerMode == False in trainer.py
     if py_utils.IsEagerMode():
       assert tf.executing_eagerly()
       tf.logging.info(f'FLAGS.tf_worker_address: {FLAGS.tf_worker_address}')
@@ -186,10 +198,13 @@ class ExecutorTpu(base_runner.BaseRunner):
           FLAGS.tf_worker_address, job_name=FLAGS.worker_job[len('/job:'):])
       tf.config.experimental_connect_to_cluster(resolver)
 
+    # also supplied (model_task_name, logdir, tf_master, trial) as args
     super().__init__(train_cfg, *args, **kwargs)
 
+    # this is obtained from the cluster's metadata
     data_parallelism = self._cluster.num_splits_per_client
     assert data_parallelism
+    # this is obtained from the cluster's metadata
     num_devices_per_split = self._cluster.num_devices_per_split
     tf.logging.info('data_parallelism: %d, num_devices_per_split: %d',
                     data_parallelism, num_devices_per_split)
@@ -202,6 +217,7 @@ class ExecutorTpu(base_runner.BaseRunner):
     self._ml_perf = None
 
     # If this is a multi-task model, grab the params for the TaskScheduler.
+    # This is a SingelTaskModel
     if issubclass(train_cfg.cls, base_model.SingleTaskModel):
       tf.logging.info('single_task_model')
       assert len(ps_params_dict) == 1
@@ -228,6 +244,7 @@ class ExecutorTpu(base_runner.BaseRunner):
 
     tf.logging.info('train_cfg.cls: %s', train_cfg.cls)
 
+    # this will be in gcp cloud bucket
     self._WriteToLog(train_cfg.ToText(), self._checkpoint_dir,
                      'trainer_params.txt')
     if self._ml_perf is not None:
@@ -239,6 +256,7 @@ class ExecutorTpu(base_runner.BaseRunner):
     # BaseRunner legacy
     self.enqueue_ops = None
 
+    # save it to train_cfg (the same train_cfg)
     train_cfg = self.params
 
     @py_utils.RetryOnTransientTfError()
@@ -280,6 +298,8 @@ class ExecutorTpu(base_runner.BaseRunner):
               num_replicas=data_parallelism,
               device_order_mode=train_cfg.train.tpu_device_order_mode)
         py_utils.SetTpuDeviceAssignment(device_assignment, job)
+
+        # Don't understand these two at all
         tf.logging.info('device_assignment.core_assignment: %s',
                         str(device_assignment.core_assignment))
         tf.logging.info('device_assignment.topology.device_coordinates: %s',
@@ -288,6 +308,7 @@ class ExecutorTpu(base_runner.BaseRunner):
         tf.logging.info('TPU initialization failed: %s', e)
         raise
 
+    # Already set _ml_perf = _ml_perf_log == False
     if self._ml_perf_log:
       mlp_log.mlperf_print(key='init_start', value=None)
     if len(self._cluster.all_worker_names) > 1:
@@ -296,21 +317,29 @@ class ExecutorTpu(base_runner.BaseRunner):
     else:
       _WaitTillInit(None)
 
+    # Will return None as the model is not a MultiTaskModel
     shared_model = self._MaybeConstructSharedModel(train_cfg)
 
     self._program_schedule_dict = {}
     self._programs = []
 
+    # only one thing in the dict since it's a SingleTaskModel
+    # task_string == '' and program_schedule_params == what returned by ProgramSchedule()
     for task_string, program_schedule_params in ps_params_dict.items():
       program_schedule_params.logdir = self._logdir
       program_schedule_params.num_splits_per_client = data_parallelism
       program_schedule_params.task_name = task_string
+
       # If the model was created above, we'll inject it here as a shared_model.
+      # shared_model == None as it is not a MultiTaskModel
+      # This will instantiate the SyntheticTrain specified in Train()
       ps = program_schedule_params.Instantiate(
           shared_model=shared_model,
           trial=self._trial,
           tf_master=self._tf_master)
       self._program_schedule_dict[task_string] = ps
+
+      # This is the long chunk in log
       tf.logging.info('program_schedule_params: %s',
                       program_schedule_params.ToText())
       self._programs += ps.Programs()
@@ -328,6 +357,7 @@ class ExecutorTpu(base_runner.BaseRunner):
     with self._cluster, tf.container(
         self._container_id), contextlib.ExitStack() as stack:
       if not py_utils.IsEagerMode():
+        # self._graph is set to tf.Graph() in base_runner.py
         stack.enter_context(self._graph.as_default())
         stack.enter_context(tf.device(self._cluster.GetPlacer()))
       if FLAGS.pdb_on_exception:

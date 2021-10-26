@@ -83,6 +83,8 @@ class BaseRunner:
 
     self._train_dir = os.path.join(self._logdir, 'train')
     tf.io.gfile.makedirs(self._train_dir)
+
+    # IsEager == False
     if py_utils.IsEagerMode():
       self._graph = None
     else:

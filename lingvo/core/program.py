@@ -1794,13 +1794,16 @@ def SimpleProgramScheduleForTask(train_dataset_name,
 
   program_schedule_params.async_postprocess = async_postprocess
 
+  # not a list, just = 0
   if isinstance(eval_steps_per_loop, list):
     if len(eval_steps_per_loop) != len(eval_dataset_names):
       raise ValueError('eval_step_per_loop doesn\'t match the size of '
                        f'eval_dataset_names: {len(eval_steps_per_loop)} vs '
                        f'{len(eval_dataset_names)}.')
   else:
+    # eval_dataset_names = []
     eval_steps_per_loop = [eval_steps_per_loop] * len(eval_dataset_names)
+  # not a list, just 0
   if isinstance(decode_steps_per_loop, list):
     if len(decode_steps_per_loop) != len(eval_dataset_names):
       raise ValueError('decode_steps_per_loop doesn\'t match the size of '

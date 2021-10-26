@@ -1873,7 +1873,7 @@ class MoEBuilder(builder.Base):
 
 
 class DenseBuilder(MoEBuilder):
-  """Desnse layrs with GShard annotations."""
+  """Dense layers with GShard annotations."""
 
   @classmethod
   def Params(cls):

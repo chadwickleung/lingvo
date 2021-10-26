@@ -69,6 +69,7 @@ class _BaseModelParams:
     try:
       all_datasets = self.GetAllDatasetParams()
       if dataset not in all_datasets:
+        tf.logging.info('No dataset by default')
         raise DatasetError(f'Dataset {dataset} not found; '
                            f'available datasets are: {all_datasets.keys()}')
       return all_datasets.get(dataset)
