@@ -333,6 +333,7 @@ class ExecutorTpu(base_runner.BaseRunner):
       # If the model was created above, we'll inject it here as a shared_model.
       # shared_model == None as it is not a MultiTaskModel
       # This will instantiate the SyntheticTrain specified in Train()
+      # !!!What does this do
       ps = program_schedule_params.Instantiate(
           shared_model=shared_model,
           trial=self._trial,
@@ -342,6 +343,7 @@ class ExecutorTpu(base_runner.BaseRunner):
       # This is the long chunk in log
       tf.logging.info('program_schedule_params: %s',
                       program_schedule_params.ToText())
+      # !!!What does this do
       self._programs += ps.Programs()
       if program_schedule_params.ml_perf.benchmark_name is not None:
         self._ml_perf = program_schedule_params.ml_perf
