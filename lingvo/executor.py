@@ -69,10 +69,13 @@ def GetExecutorParams(model_name, cluster_params, model_registry):
 
   ps_params_dict = {}
   with cluster_factory.Cluster(cluster_params):
+    # Confirmed: ps_cfg == what returned by ProgramSchedule() in lm.synthetic_packed_input.DenseLM8B2x2
+    # Confirmed: model_name == lm.synthetic_packed_input.DenseLM8B2x2
     ps_cfg = model_registry.GetProgramSchedule(model_name)
-    tf.logging.info('Got program schedule')
 
     # get train_cfg, where train_cfg is a p and p.task == what returned by Task()
+    # Confirmed: train_cfg == model_params & train_cfg.task == what returned by Task() in 
+    # lm.synthetic_packed_input.DenseLM8B2x2
     train_cfg = model_registry.GetParams(model_name, 'Train')
     train_cfg.cluster = cluster_params
 
@@ -218,16 +221,14 @@ class ExecutorTpu(base_runner.BaseRunner):
     self._ml_perf = None
 
     # If this is a multi-task model, grab the params for the TaskScheduler.
-    # This is a SingelTaskModel
+    # Confirmed: SingelTaskModel
     if issubclass(train_cfg.cls, base_model.SingleTaskModel):
-      tf.logging.info('single_task_model')
       assert len(ps_params_dict) == 1
       # This means there's no _model_task_name for SingleTaskModel
       self._model_task_name = list(ps_params_dict.keys())[0]
       self._single_task_mode = True
+    # NOT MultiTaskModel
     elif issubclass(train_cfg.cls, base_model.MultiTaskModel):
-      tf.logging.info('multi_task_model')
-
       if issubclass(train_cfg.cls, multitask_model.RegExSharedVariableModel):
         self._variable_renaming_rules = train_cfg.variable_renaming_rules
 
@@ -244,9 +245,10 @@ class ExecutorTpu(base_runner.BaseRunner):
           'Model %s is not a sub-class of SingleTaskModel or MultiTaskModel',
           train_cfg.cls)
 
+    # Confirmed: train_cfg.cls == SingleTaskModel
     tf.logging.info('train_cfg.cls: %s', train_cfg.cls)
 
-    # this will be in gcp cloud bucket
+    # Confirmed: Write to gcp cloud bucket
     self._WriteToLog(train_cfg.ToText(), self._checkpoint_dir,
                      'trainer_params.txt')
     if self._ml_perf is not None:
@@ -338,6 +340,7 @@ class ExecutorTpu(base_runner.BaseRunner):
       # shared_model == None as it is not a MultiTaskModel
       # This will instantiate the SimpleProgramScheduleForTask specified in ProgramSchedule()
       # A SimpleProgramSchedule will be initialized thru hyperparams.py
+      tf.logging.info('Instantialte Program Schedule using its params')
       ps = program_schedule_params.Instantiate(
           shared_model=shared_model,
           trial=self._trial,

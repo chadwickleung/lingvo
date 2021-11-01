@@ -69,7 +69,7 @@ class _BaseModelParams:
     try:
       all_datasets = self.GetAllDatasetParams()
       if dataset not in all_datasets:
-        tf.logging.info('No dataset by default')
+        tf.logging.info('%s not found', dataset)
         raise DatasetError(f'Dataset {dataset} not found; '
                            f'available datasets are: {all_datasets.keys()}')
       return all_datasets.get(dataset)
@@ -83,6 +83,7 @@ class _BaseModelParams:
       raise DatasetError(
           str(e) +
           '; available datasets are: %s' % datasets.GetDatasets(type(self)))
+    tf.logging.info('Found %s and called its method', dataset)
     return f()
 
 

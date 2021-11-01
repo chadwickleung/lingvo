@@ -1615,6 +1615,7 @@ class SimpleProgramSchedule:
                trial=base_trial.NoOpTrial(),
                **kwargs):
     # params is program_schedule_params as supplied in executor.py
+    tf.logging.info('Instantiating Program Schedule')
     self.params = params.Copy()
     p = self.params
     # shared_model == None
@@ -1625,12 +1626,18 @@ class SimpleProgramSchedule:
     # Propagate run-time parameters to programs:
     if p.train_executions_per_eval > 0:
       p.train_program.logdir = p.logdir
-      tf.logging.info('dataset_name = %s', p.train_program.dataset_name)
+
+      # Confirmed: dataset_name == 'Train'
       if p.train_program.dataset_name not in p.task_dict:
+        # Confirmed: 'Train' is in p.task_dict
         raise ValueError('could not find train dataset %s in %s' %
                          (p.train_program.dataset_name, p.task_dict))
+
+      # TODO: How is task_dict set
+      # p.train_program.task 
       p.train_program.task = p.task_dict[p.train_program.dataset_name]
       p.train_program.num_splits_per_client = p.num_splits_per_client
+
       tf.logging.info('task_name = %s', p.task_name)
       p.train_program.task_name = p.task_name
       p.train_program.ml_perf = p.ml_perf.Copy()
@@ -1793,7 +1800,8 @@ def SimpleProgramScheduleForTask(train_dataset_name,
 
   # This will create a InstantiableParams
   program_schedule_params = SimpleProgramSchedule.Params()
-  # TODO: Dig into _CreateProgramParams and see what is returned
+  
+  # Confirmed: _CreateProgramParams returns a train program params 
   program_schedule_params.train_program = _CreateProgramParams(
       train_program_cls, 'train', train_dataset_name, train_steps_per_loop)
 
@@ -1801,16 +1809,16 @@ def SimpleProgramScheduleForTask(train_dataset_name,
 
   program_schedule_params.async_postprocess = async_postprocess
 
-  # not a list, just = 0
+  # Confirmed: eval_steps_per_loop == 0
   if isinstance(eval_steps_per_loop, list):
     if len(eval_steps_per_loop) != len(eval_dataset_names):
       raise ValueError('eval_step_per_loop doesn\'t match the size of '
                        f'eval_dataset_names: {len(eval_steps_per_loop)} vs '
                        f'{len(eval_dataset_names)}.')
   else:
-    # eval_dataset_names = []
+    # Confirmed: eval_dataset_names == []
     eval_steps_per_loop = [eval_steps_per_loop] * len(eval_dataset_names)
-  # not a list, just 0
+  # Confirmed: decode_steps_per_loop == 0
   if isinstance(decode_steps_per_loop, list):
     if len(decode_steps_per_loop) != len(eval_dataset_names):
       raise ValueError('decode_steps_per_loop doesn\'t match the size of '
@@ -1831,6 +1839,7 @@ def SimpleProgramScheduleForTask(train_dataset_name,
     postprocess_all_at_once = [postprocess_all_at_once
                               ] * len(eval_dataset_names)
 
+  # Confirmed: eval_dataset_names == []
   for idx, dataset_name in enumerate(eval_dataset_names):
     program_schedule_params.dataset_names.append(dataset_name)
     if eval_steps_per_loop[idx] > 0:

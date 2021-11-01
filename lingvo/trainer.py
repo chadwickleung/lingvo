@@ -1295,9 +1295,8 @@ class RunnerManager:
       return self.Decoder(dataset_name.lower(), cfg, *common_args)
     elif job in ('ps', 'worker', 'input'):
       self._tf_server.join()
+    # Confirmed: job == executor_tpu
     elif job == 'executor_tpu':
-      tf.logging.info('Job == executor_tpu')
-      tf.logging.info('Get Executor Params')
       ps_cfg_dict, train_cfg = self.GetExecutorParams()
       return self.ExecutorTpu(train_cfg, ps_cfg_dict, *common_args)
     else:
@@ -1324,8 +1323,7 @@ class RunnerManager:
       if (is_training and (j.startswith('decoder') or j.startswith('evaler'))):
         tf_master = ''
 
-      # !!!What is FLAGS.model_task_name, might not need it since it's not MultiTaskModel
-      tf.logging.info('model_task_name = %s', FLAGS.model_task_name)
+      # Confirmed: model_task_name == '' 
       runner = self._CreateRunner(j, FLAGS.model_task_name, logdir, tf_master,
                                   trial)
       runners.append(runner)

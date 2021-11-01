@@ -258,10 +258,9 @@ class _ModelRegistryHelper:
           dataset_task_params = model_params_obj.GetDatasetParams('Task_' +
                                                                   dataset_name)
           # Overwrite task params with dataset specific ones.
-          # did not run the next line
+          # GetDatasetParams failed, will not overwrite
           cfg.task = dataset_task_params
         except base_model_params.DatasetError:
-          # there was no dataset specific task parameters for train for the model
           tf.logging.info('No dataset specific task parameters for %s',
                           dataset_name)
 
