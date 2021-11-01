@@ -133,9 +133,9 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
     p.train.learning_rate = 1.0
 
     p.train.lr_schedule = schedule.SqrtDecay.Params().Set(
-        warmup_steps=10000, multiplier=1.0)
+        warmup_steps=100, multiplier=1.0)
 
-    p.train.max_steps = 2000000
+    p.train.max_steps = 200
     p.train.save_max_to_keep = 100
 
     return p
