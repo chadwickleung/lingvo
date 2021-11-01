@@ -181,6 +181,7 @@ class ExecutorTpu(base_runner.BaseRunner):
 
     Args:
       train_cfg: SingleTaskModelParams or MultiTaskModelParams, where 
+        train_cfg is the model (lm...),
         train_cfg.task == what returned by Task()
       ps_params_dict: A dict of top-level task name -> ProgramSchedule params,
         if train_cfg is a SingleTaskModelParams, we expect only one entry,
@@ -221,6 +222,7 @@ class ExecutorTpu(base_runner.BaseRunner):
     if issubclass(train_cfg.cls, base_model.SingleTaskModel):
       tf.logging.info('single_task_model')
       assert len(ps_params_dict) == 1
+      # This means there's no _model_task_name for SingleTaskModel
       self._model_task_name = list(ps_params_dict.keys())[0]
       self._single_task_mode = True
     elif issubclass(train_cfg.cls, base_model.MultiTaskModel):
@@ -257,6 +259,7 @@ class ExecutorTpu(base_runner.BaseRunner):
     self.enqueue_ops = None
 
     # save it to train_cfg (the same train_cfg)
+    # set-ed self.params
     train_cfg = self.params
 
     @py_utils.RetryOnTransientTfError()
@@ -328,12 +331,13 @@ class ExecutorTpu(base_runner.BaseRunner):
     for task_string, program_schedule_params in ps_params_dict.items():
       program_schedule_params.logdir = self._logdir
       program_schedule_params.num_splits_per_client = data_parallelism
+      # task_string == ''
       program_schedule_params.task_name = task_string
 
       # If the model was created above, we'll inject it here as a shared_model.
       # shared_model == None as it is not a MultiTaskModel
-      # This will instantiate the SyntheticTrain specified in Train()
-      # !!!What does this do
+      # This will instantiate the SimpleProgramScheduleForTask specified in ProgramSchedule()
+      # A SimpleProgramSchedule will be initialized thru hyperparams.py
       ps = program_schedule_params.Instantiate(
           shared_model=shared_model,
           trial=self._trial,

@@ -59,10 +59,12 @@ class BaseRunner:
     self._daemon = False
     self._verbose_enqueue_logging = False
 
+    # this just return the same thing, same p
     self._params = trial.OverrideModelParams(p)
 
     # This is the long list of model configs
     tf.logging.info('=' * 60)
+    # self.params is a class property, which returns self._params
     for line in self.params.ToText().split('\n'):
       tf.logging.info('%s', line)
     tf.logging.info('=' * 60)

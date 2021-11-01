@@ -1614,8 +1614,10 @@ class SimpleProgramSchedule:
                shared_model=None,
                trial=base_trial.NoOpTrial(),
                **kwargs):
+    # params is program_schedule_params as supplied in executor.py
     self.params = params.Copy()
     p = self.params
+    # shared_model == None
     self._shared_model = shared_model
     self._programs = []
     self.train_program = None
@@ -1623,13 +1625,16 @@ class SimpleProgramSchedule:
     # Propagate run-time parameters to programs:
     if p.train_executions_per_eval > 0:
       p.train_program.logdir = p.logdir
+      tf.logging.info('dataset_name = %s', p.train_program.dataset_name)
       if p.train_program.dataset_name not in p.task_dict:
         raise ValueError('could not find train dataset %s in %s' %
                          (p.train_program.dataset_name, p.task_dict))
       p.train_program.task = p.task_dict[p.train_program.dataset_name]
       p.train_program.num_splits_per_client = p.num_splits_per_client
+      tf.logging.info('task_name = %s', p.tast_name)
       p.train_program.task_name = p.task_name
       p.train_program.ml_perf = p.ml_perf.Copy()
+      # train_program is instantiated in SimpleProgramScheduleForTask()
       self.train_program = p.train_program.Instantiate(
           shared_model=shared_model, trial=trial, **kwargs)
       self._programs.append(self.train_program)
@@ -1786,7 +1791,9 @@ def SimpleProgramScheduleForTask(train_dataset_name,
     A populated SimpleProgramSchedule.Params()
   """
 
+  # This will create a InstantiableParams
   program_schedule_params = SimpleProgramSchedule.Params()
+  # TODO: Dig into _CreateProgramParams and see what is returned
   program_schedule_params.train_program = _CreateProgramParams(
       train_program_cls, 'train', train_dataset_name, train_steps_per_loop)
 
