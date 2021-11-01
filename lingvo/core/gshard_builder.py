@@ -2652,6 +2652,8 @@ class DenseBuilder(MoEBuilder):
     else:
       input_endpoints = self._EncoderLayerInMapKeys
 
+    tf.logging.info('##############Saw some hints#################')
+
     return self._Graph(
         name, input_endpoints, ['outputs', 'aux_loss'],
         ('vec->input_split', self.Split('input_split')),

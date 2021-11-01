@@ -1638,7 +1638,7 @@ class SimpleProgramSchedule:
       p.train_program.task = p.task_dict[p.train_program.dataset_name]
       p.train_program.num_splits_per_client = p.num_splits_per_client
 
-      tf.logging.info('task_name = %s', p.task_name)
+      # Confirmed: task_name == ''
       p.train_program.task_name = p.task_name
       p.train_program.ml_perf = p.ml_perf.Copy()
       # train_program is instantiated in SimpleProgramScheduleForTask()
@@ -1652,6 +1652,7 @@ class SimpleProgramSchedule:
                        'apply the EMA before eval programs can use it.')
 
     for eval_program_params in p.eval_programs:
+      tf.logging.info('p.eval_programs is not empty')
       eval_program_params.logdir = p.logdir
       if eval_program_params.dataset_name not in p.task_dict:
         raise ValueError('could not find eval dataset %s in %s' %
