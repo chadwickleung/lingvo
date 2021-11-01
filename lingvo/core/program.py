@@ -1624,6 +1624,7 @@ class SimpleProgramSchedule:
     self.train_program = None
 
     # Propagate run-time parameters to programs:
+    tf.logging.info('p.train_executions_per_eval: %d', p.train_executions_per_eval)
     if p.train_executions_per_eval > 0:
       p.train_program.logdir = p.logdir
 
@@ -1634,14 +1635,16 @@ class SimpleProgramSchedule:
                          (p.train_program.dataset_name, p.task_dict))
 
       # TODO: How is task_dict set
-      # p.train_program.task 
+      # p.train_program is set in SimpleProgramScheduleForTask
       p.train_program.task = p.task_dict[p.train_program.dataset_name]
       p.train_program.num_splits_per_client = p.num_splits_per_client
 
       # Confirmed: task_name == ''
       p.train_program.task_name = p.task_name
       p.train_program.ml_perf = p.ml_perf.Copy()
-      # train_program is instantiated in SimpleProgramScheduleForTask()
+
+      # p.train_program is instantiated in SimpleProgramScheduleForTask()
+      # p.train_program is a class of TrainProgram
       self.train_program = p.train_program.Instantiate(
           shared_model=shared_model, trial=trial, **kwargs)
       self._programs.append(self.train_program)
@@ -1651,8 +1654,8 @@ class SimpleProgramSchedule:
       raise ValueError('When EMA is used, there must be a train program to '
                        'apply the EMA before eval programs can use it.')
 
+    tf.logging.info('p.eval_programs has %d elements', len(p.eval_programs))
     for eval_program_params in p.eval_programs:
-      tf.logging.info('p.eval_programs is not empty')
       eval_program_params.logdir = p.logdir
       if eval_program_params.dataset_name not in p.task_dict:
         raise ValueError('could not find eval dataset %s in %s' %
