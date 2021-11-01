@@ -1631,7 +1631,7 @@ class SimpleProgramSchedule:
                          (p.train_program.dataset_name, p.task_dict))
       p.train_program.task = p.task_dict[p.train_program.dataset_name]
       p.train_program.num_splits_per_client = p.num_splits_per_client
-      tf.logging.info('task_name = %s', p.tast_name)
+      tf.logging.info('task_name = %s', p.task_name)
       p.train_program.task_name = p.task_name
       p.train_program.ml_perf = p.ml_perf.Copy()
       # train_program is instantiated in SimpleProgramScheduleForTask()
