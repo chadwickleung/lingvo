@@ -92,6 +92,7 @@ class BaseRunner:
     if py_utils.IsEagerMode():
       self._graph = None
     else:
+      tf.logging.info('_graph : tf.Graph()')
       self._graph = tf.Graph()
     self._summary_writer = None
     self._initialize_tables = None

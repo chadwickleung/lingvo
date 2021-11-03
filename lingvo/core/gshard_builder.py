@@ -367,6 +367,7 @@ class MoEBuilder(builder.Base):
     )
 
   def Embedding(self, name, vocab_dim):
+    tf.logging.info('##############Saw some hints#################')
     return self._Graph(
         name, ['ids'], ['outputs'],
         ('->emb', self._EmbeddingWeight('w', vocab_dim)),
@@ -592,6 +593,7 @@ class MoEBuilder(builder.Base):
                   spmd_pipeline_stages, spmd_pipeline_microbatches, imap_keys,
                   layer_fn):
     # TODO(yuanzx): Consider refactor this into a layer.
+    tf.logging.info('##############Saw some hints#################')
     assert 'segment_id' in imap_keys
     if use_repeat_layer:
       assert self.params.deterministic_dropout
@@ -770,6 +772,7 @@ class MoEBuilder(builder.Base):
     else:
       raise ValueError('Activation %s not supported.' % activation)
 
+    tf.logging.info('##############Saw some hints#################')
     return self._Graph(
         name,
         input_endpoints,
@@ -833,6 +836,7 @@ class MoEBuilder(builder.Base):
           # linear / pass-through
           tf.einsum('MH,BLM->BLH', wi_1, inputs))
 
+    tf.logging.info('##############Saw some hints#################')
     return self._Graph(
         name,
         input_endpoints,
@@ -863,6 +867,7 @@ class MoEBuilder(builder.Base):
     else:
       input_endpoints = self._EncoderLayerInMapKeys
 
+    tf.logging.info('##############Saw some hints#################')
     return self._Graph(
         name, input_endpoints, ['outputs', 'aux_loss'],
         ('vec->input_split', self.Split('input_split')),
@@ -948,6 +953,7 @@ class MoEBuilder(builder.Base):
       softmax = tf.cast(softmax, py_utils.FPropDtype(self.params))
       return softmax
 
+    tf.logging.info('##############Saw some hints#################')
     return self._Graph(
         name,
         ['_q', '_k', '_v', 'bias'],
@@ -2530,6 +2536,7 @@ class DenseBuilder(MoEBuilder):
       wi = tf.concat([tf.expand_dims(wi_0, 0), tf.expand_dims(wi_1, 0)], 0)
       o1, o2 = [
           tf.squeeze(o, 0) for o in tf.split(
+
               self._EinsumWithModelDim('KMH,BLM->KBLH', wi, inputs), 2, 0)
       ]
       # To match historic behavior use approximate=True with tf.nn.gelu
