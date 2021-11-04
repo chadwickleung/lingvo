@@ -2132,7 +2132,7 @@ class DenseBuilder(MoEBuilder):
 
   def Embedding(self, name, vocab_dim):
     p = self.params
-    tf.logging.info("DenseBuilder's Embedding")
+    tf.logging.info("################DenseBuilder's Embedding################")
     return self._Graph(
         name, ['ids'], ['outputs'],
         ('->emb_orig',
@@ -3113,6 +3113,7 @@ class UniTransformer(base_model.BaseTask):
     assert p.num_transformer_layers % p.num_spmd_pipeline_stages == 0
     # Specified in Task()
     tf.logging.info('Initiating DenseBuilder')
+    tf.logging.info('Initializing DenseBuilder -> MoEBuilder -> Base')
     b = p.builder.Instantiate()
 
     tgt_vocab_size = p.vocab_size
@@ -3134,6 +3135,7 @@ class UniTransformer(base_model.BaseTask):
       dec_pos_emb = b.Embedding('dec_pos_emb', p.max_length)
       self.CreateChild('dec_pos_emb', dec_pos_emb)
 
+    # Not applicable
     if p.parallel_ffn:  # Only works with RecurrentDenseBuilderParallelDecode.
       assert not p.positional_embedding
       assert gated_ffn_activation

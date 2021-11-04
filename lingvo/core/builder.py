@@ -89,7 +89,6 @@ class Base:
 
   def __init__(self, params):
     # Sub-classes should put some options common to many layers in __init__.
-    tf.logging.info('Initializing DenseBuilder -> MoEBuilder -> Base')
     self._params = params.Copy()
 
   ######################################################################
