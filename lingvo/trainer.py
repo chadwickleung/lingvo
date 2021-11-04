@@ -1340,6 +1340,7 @@ class RunnerManager:
     Returns:
       None.
     """
+    tf.logging.info('Created runners')
     threads = []
     tf.logging.info('Starting runners')
     for runner in runners:

@@ -350,7 +350,6 @@ class ExecutorTpu(base_runner.BaseRunner):
       # This is the long chunk in log
       tf.logging.info('program_schedule_params: %s',
                       program_schedule_params.ToText())
-      # !!!What does this do
       self._programs += ps.Programs()
       if program_schedule_params.ml_perf.benchmark_name is not None:
         self._ml_perf = program_schedule_params.ml_perf
@@ -386,6 +385,8 @@ class ExecutorTpu(base_runner.BaseRunner):
         # must be built before any eval programs in order to apply EMA. This is
         # currently guaranteed by SimpleProgramSchedule.
         for program in self._programs:
+          # Confirmed: Calls BuildTpuSubgraph of class TrainProgram in program.py
+          # since self._programs is a list of TrainProgram
           program.BuildTpuSubgraph()
           py_utils.ClearTpuSummaryTensors()
 
@@ -412,6 +413,7 @@ class ExecutorTpu(base_runner.BaseRunner):
 
       for program in self._programs:
         program.SetStatusMessageFn(self._SetStatusMessage)
+        # Not EagerMode
         if py_utils.IsEagerMode():
           # A single checkpinter `_eager_checkpointer` is used
           pass
@@ -433,6 +435,7 @@ class ExecutorTpu(base_runner.BaseRunner):
       self._load_ops = tpu_embedding_collection.load_ops
       self._retrieve_ops = tpu_embedding_collection.retrieve_ops
       self._tpu_embedding = tpu_embedding_collection.tpu_embedding
+      tf.logging.info('Finished ExecutorTpu')
 
   def _GetSession(self, **kwargs):
     if py_utils.IsEagerMode():
