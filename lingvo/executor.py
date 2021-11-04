@@ -202,7 +202,7 @@ class ExecutorTpu(base_runner.BaseRunner):
           FLAGS.tf_worker_address, job_name=FLAGS.worker_job[len('/job:'):])
       tf.config.experimental_connect_to_cluster(resolver)
 
-    # also supplied (model_task_name, logdir, tf_master, trial) as args
+    # Confirmed: Initializes BaseRunner and prints the model params
     super().__init__(train_cfg, *args, **kwargs)
 
     # this is obtained from the cluster's metadata
@@ -365,6 +365,7 @@ class ExecutorTpu(base_runner.BaseRunner):
 
     with self._cluster, tf.container(
         self._container_id), contextlib.ExitStack() as stack:
+      # Confirmed: Not EagerMode
       if not py_utils.IsEagerMode():
         # self._graph is set to tf.Graph() in base_runner.py
         stack.enter_context(self._graph.as_default())
