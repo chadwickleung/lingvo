@@ -1581,6 +1581,7 @@ class MoEBuilder(builder.Base):
     tf.logging.warning('gshard_utils.Split is deprecated. '
                        'Please use gshard_utils.MeshSplit with specific '
                        'device_mesh and device_mesh_shape set in the Builder.')
+    tf.logging.info('Caller = {self.cls}, name = {name}')
     return self._Fn(
         name,
         lambda x: gshard_utils.Split(x, 0, num_devices=self.params.num_devices))
