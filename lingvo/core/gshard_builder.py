@@ -3116,6 +3116,7 @@ class UniTransformer(base_model.BaseTask):
     # Specified in Task()
     tf.logging.info('Initiating DenseBuilder')
     tf.logging.info('Initializing DenseBuilder -> MoEBuilder -> Base')
+    # Confirmed: b == DenseBuilder instance
     b = p.builder.Instantiate()
 
     tgt_vocab_size = p.vocab_size
@@ -3130,16 +3131,19 @@ class UniTransformer(base_model.BaseTask):
       assert not p.gated_ffn_activation, p.gated_ffn_activation
       gated_ffn_activation = None
 
+    tf.logging.info('################First call to Embedding################')
     dec_emb = b.Embedding('dec_emb', tgt_vocab_size)
     self.CreateChild('dec_emb', dec_emb)
 
+    # Confirmed: p.positional_embedding == FALSE
     if p.positional_embedding:
-      tf.logging.info('################positional_embedding == TRUE')
+      tf.logging.info('################positional_embedding == TRUE################')
       dec_pos_emb = b.Embedding('dec_pos_emb', p.max_length)
       self.CreateChild('dec_pos_emb', dec_pos_emb)
 
-    # Not applicable
+    # Confirmed: p.parallel_ffn == FALSE
     if p.parallel_ffn:  # Only works with RecurrentDenseBuilderParallelDecode.
+      tf.logging.info('################Parallel ffn################')
       assert not p.positional_embedding
       assert gated_ffn_activation
       assert isinstance(b, RecurrentDenseBuilderParallelDecode)
@@ -3172,6 +3176,7 @@ class UniTransformer(base_model.BaseTask):
         atten_layer = b.DecMultiDconvHeadAttentionRelativeBias(
             'multi_dconv_head_att')
       else:
+        # Confirmed: Uses DecSelfAttentionRelativeBias
         tf.logging.info('################dec self attention################')
         atten_layer = b.DecSelfAttentionRelativeBias('dec_self_attention')
       if gated_ffn_activation is None:
@@ -3179,10 +3184,12 @@ class UniTransformer(base_model.BaseTask):
         ffw_layer = b.DenseReluDense(
             'dense_relu_dense', decoder=True, activation=p.activation)
       else:
+        # Confirmed: Uses DenseReluDenseGated
         tf.logging.info('################Dense relu dense gated################')
         ffw_layer = b.DenseReluDenseGated(
             'dense_relu_dense', gated_ffn_activation, decoder=True)
       if p.moe:
+        # TODO: What is the difference between MoEGated and MoE?
         tf.logging.info('################MoE################')
         if p.moe_gated_gelu:
           tf.logging.info('################MoE gated################')
