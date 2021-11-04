@@ -1967,6 +1967,7 @@ class DenseBuilder(MoEBuilder):
     return super().DepthwiseConvAutoregressive(name, kernel_size, model_dims)
 
   def EinsumWithModelDim(self, name, equation):
+    tf.logging.info('################EinsumWithModelDim################')
 
     def _Fn(x, y):
       return gshard_layers.EinsumWithModelDim(equation, x, y,
@@ -2015,6 +2016,7 @@ class DenseBuilder(MoEBuilder):
     return device_mesh
 
   def _MeshSplit(self, x, tensor_split_dims_mapping):
+    tf.logging.info('################MeshSplit################')
     if tensor_split_dims_mapping is None:
       return x
 
@@ -3132,6 +3134,7 @@ class UniTransformer(base_model.BaseTask):
     self.CreateChild('dec_emb', dec_emb)
 
     if p.positional_embedding:
+      tf.logging.info('################positional_embedding == TRUE')
       dec_pos_emb = b.Embedding('dec_pos_emb', p.max_length)
       self.CreateChild('dec_pos_emb', dec_pos_emb)
 
@@ -3162,26 +3165,35 @@ class UniTransformer(base_model.BaseTask):
           norm_policy=p.norm_policy)
     else:
       if p.positional_embedding:
+        tf.logging.info('################Positional embedding################')
         atten_layer = b.DecSelfAttention('dec_self_attention')
       elif p.multi_dconv_head_att:
+        tf.logging.info('################Multi dconv head att################')
         atten_layer = b.DecMultiDconvHeadAttentionRelativeBias(
             'multi_dconv_head_att')
       else:
+        tf.logging.info('################dec self attention################')
         atten_layer = b.DecSelfAttentionRelativeBias('dec_self_attention')
       if gated_ffn_activation is None:
+        tf.logging.info('################Dense relu dense################')
         ffw_layer = b.DenseReluDense(
             'dense_relu_dense', decoder=True, activation=p.activation)
       else:
+        tf.logging.info('################Dense relu dense gated################')
         ffw_layer = b.DenseReluDenseGated(
             'dense_relu_dense', gated_ffn_activation, decoder=True)
       if p.moe:
+        tf.logging.info('################MoE################')
         if p.moe_gated_gelu:
+          tf.logging.info('################MoE gated################')
           moe_layer = b.MoEGated('moe', decoder=True)
         else:
+          tf.logging.info('################MoE not gated################')
           moe_layer = b.MoE('moe', decoder=True)
         decoder_sub_layers = [atten_layer, moe_layer, atten_layer, ffw_layer]
         num_decoder_layers = p.num_transformer_layers // 2
       else:
+        tf.logging.info('################NOT MoE################')
         decoder_sub_layers = [atten_layer, ffw_layer]
         num_decoder_layers = p.num_transformer_layers
       dec = b.DecoderLayerStack(
