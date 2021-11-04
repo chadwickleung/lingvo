@@ -113,7 +113,8 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             model_dim=self.MODEL_DIM,
             attention_num_heads=self.NUM_HEADS,
             ff_dim=self.HIDDEN_DIM,
-            attention_combine_dims=True),
+            attention_combine_dims=True,
+            moe_hidden_dim = self.MOE_HIDDEN_DIM),
 
         batch_size=batch_size_per_tf_replica,
         sequence_length=self.SEQUENCE_LENGTH,
@@ -122,8 +123,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
         label_smoothing=self.LABEL_SMOOTHING,
         vocab_size=self.VOCAB_SIZE,
         max_length=self.SEQUENCE_LENGTH,
-        moe = self.MOE,
-        moe_hidden_dim = self.MOE_HIDDEN_DIM)
+        moe = self.MOE)
 
     p.train.optimizer = optimizer.XLAShardingAdafactor.Params().Set(
         beta1=0.0,
