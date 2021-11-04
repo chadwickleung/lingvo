@@ -367,6 +367,7 @@ class BaseProgram:
     Returns:
       An instantiated object based on task_params.
     """
+    # Not a MultiTaskModel
     if issubclass(task_params.cls, base_model.MultiTaskSubModel):
       return task_params.Instantiate(shared_model=self._shared_model)
     return task_params.Instantiate()
@@ -546,8 +547,10 @@ class TrainProgram(BaseProgram):
         self.params.spmd or
         self._task_params.input.use_partitioned_infeed_queue)
 
+    tf.logging.info('Eval metrics')
     self._eval_metrics = metrics.TpuEvalMetrics(max_metrics=p.max_metrics)
 
+    tf.logging.info('Try to instantiate model')
     with py_utils.OpportunisticVariableReuseScope(True):
       self._model = self._InstantiateTaskModel(self._task_params)
     self._task = self._model.GetTask()

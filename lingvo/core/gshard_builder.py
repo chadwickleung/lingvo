@@ -2132,6 +2132,7 @@ class DenseBuilder(MoEBuilder):
 
   def Embedding(self, name, vocab_dim):
     p = self.params
+    tf.logging.info("DenseBuilder's Embedding")
     return self._Graph(
         name, ['ids'], ['outputs'],
         ('->emb_orig',
@@ -3103,13 +3104,15 @@ class UniTransformer(base_model.BaseTask):
 
   def __init__(self, params):
     tf.logging.info('Instantiating UniTransformer')
+    # Confirmed: Initializes BaseTask
     super().__init__(params)
     p = self.params
 
     if p.use_repeat_layer or p.num_spmd_pipeline_stages > 1:
       p.builder.deterministic_dropout = True
     assert p.num_transformer_layers % p.num_spmd_pipeline_stages == 0
-    tf.logging.info('Initializing Gshard builder')
+    # Specified in Task()
+    tf.logging.info('Initiating DenseBuilder')
     b = p.builder.Instantiate()
 
     tgt_vocab_size = p.vocab_size
