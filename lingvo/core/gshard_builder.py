@@ -2051,6 +2051,7 @@ class DenseBuilder(MoEBuilder):
     else:
       input_endpoints = self._EncoderLayerInMapKeys
     p = self.params
+    tf.logging.info('################Called MoE################')
     return self._Graph(
         name, input_endpoints, ['outputs', 'aux_loss'],
         ('vec->input_split',
@@ -2996,6 +2997,7 @@ class RecurrentDenseBuilderParallelDecode(DenseBuilder):
     del norm_type, norm_policy
     p = self.params
     assert p.deterministic_dropout
+    tf.logging.info('################Hints################')
     stack = [
         ('i.vec->inputs_split',
          self.MeshSplit('inputs_split', self._AdjustMSplit(p.blm_split, 2))),
