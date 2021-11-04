@@ -3102,12 +3102,14 @@ class UniTransformer(base_model.BaseTask):
     return p
 
   def __init__(self, params):
+    tf.logging.info('Instantiating UniTransformer')
     super().__init__(params)
     p = self.params
 
     if p.use_repeat_layer or p.num_spmd_pipeline_stages > 1:
       p.builder.deterministic_dropout = True
     assert p.num_transformer_layers % p.num_spmd_pipeline_stages == 0
+    tf.logging.info('Initializing Gshard builder')
     b = p.builder.Instantiate()
 
     tgt_vocab_size = p.vocab_size
