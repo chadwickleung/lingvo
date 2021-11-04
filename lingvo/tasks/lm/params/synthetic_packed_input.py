@@ -77,6 +77,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
   USE_REPEAT_LAYER = False
   TRAIN_STEPS_PER_LOOP = 100
   MOE = True
+  MOE_HIDDEN_DIM = self.MODEL_DIM * 2
 
   def Task(self):
     # tokens per batch per replica (~64 cores)
@@ -121,7 +122,8 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
         label_smoothing=self.LABEL_SMOOTHING,
         vocab_size=self.VOCAB_SIZE,
         max_length=self.SEQUENCE_LENGTH,
-        moe = self.MOE)
+        moe = self.MOE,
+        moe_hidden_dim = self.MOE_HIDDEN_DIM)
 
     p.train.optimizer = optimizer.XLAShardingAdafactor.Params().Set(
         beta1=0.0,
