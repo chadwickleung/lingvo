@@ -407,6 +407,7 @@ class BaseTask(base_layer.BaseLayer):
                              'The input generator may not iterate over exactly '
                              'one epoch per run')
       input_params = input_policy.Apply(p.input)
+
       tf.logging.info('input_params: %s', input_params)
       self.CreateChild('input', input_params)
 
@@ -414,6 +415,8 @@ class BaseTask(base_layer.BaseLayer):
 
     # p.train can be None if this task is the teacher/student task in a
     # DistillationTask.
+
+    # Confirmed: Produces 'Ignoring...' info (learner.py)
     if tp:
       self._SetLearnerFromLegacyParams(tp)
       if tp.learner is not None:
