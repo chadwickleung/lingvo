@@ -248,8 +248,10 @@ class MoEBuilder(builder.Base):
 
   def _AdjustMSplit(self, split, m_dim):
     """Adjusts split annotation according to model_dim_reshape_segments."""
+    tf.logging.info('################Called _AdjustSplit################')
     if split is None:
       return None
+    # TO confirm: Adjusted model_dim_reshape_segments in Task()
     if self._model_dim_reshape_segments is None:
       return split
     new_split = list(split)
@@ -599,6 +601,7 @@ class MoEBuilder(builder.Base):
       assert self.params.deterministic_dropout
     stack = []
     for key in imap_keys:
+      tf.logging.info('################Split for %s################', key)
       stack.append(
           ('i.' + key + '->' + key + '_split', self.Split(key + '_split')))
 
@@ -2016,7 +2019,7 @@ class DenseBuilder(MoEBuilder):
     return device_mesh
 
   def _MeshSplit(self, x, tensor_split_dims_mapping):
-    tf.logging.info('################MeshSplit################')
+    tf.logging.info('################Uses _MeshSplit in lambda function################')
     if tensor_split_dims_mapping is None:
       return x
 
@@ -2039,10 +2042,12 @@ class DenseBuilder(MoEBuilder):
         assert (d % m == 0), (x, self._device_mesh.shape,
                               tensor_split_dims_mapping)
 
+    tf.logging.info('################Calls gshard_utils.MeshSplit################')
     return gshard_utils.MeshSplit(x, self._device_mesh,
                                   tensor_split_dims_mapping)
 
   def MeshSplit(self, name, tensor_split_dims_mapping):
+    tf.logging.info('################MeshSplit################')
     return self._Fn(name,
                     lambda x: self._MeshSplit(x, tensor_split_dims_mapping))
 
@@ -2068,6 +2073,7 @@ class DenseBuilder(MoEBuilder):
 
   def _ShardedFeedForwardNetworksWeights(self, name, model_dim=None):
     """Gets the sharded weights for the two layer feedforward nets."""
+    tf.logging.info('################Calling SharedFeedForwaredNetworkWeights################')
     p = self.params
     device_mesh = self._device_mesh
     if model_dim is None:
@@ -2107,6 +2113,7 @@ class DenseBuilder(MoEBuilder):
 
   def _ShardedMoEPositionWiseFeedForwardNetworks(self, name):
     """Simple MoE FFN with xla_sharding."""
+    tf.logging.info('################Called _ShardedMoEPositionWiseFeedForwardNetworks################')
     p = self.params
     num_groups = p.num_groups or p.num_devices
 
@@ -3197,12 +3204,16 @@ class UniTransformer(base_model.BaseTask):
         else:
           tf.logging.info('################MoE not gated################')
           moe_layer = b.MoE('moe', decoder=True)
+          tf.logging.info('################Constructed MoE layer################')
         decoder_sub_layers = [atten_layer, moe_layer, atten_layer, ffw_layer]
         num_decoder_layers = p.num_transformer_layers // 2
       else:
         tf.logging.info('################NOT MoE################')
         decoder_sub_layers = [atten_layer, ffw_layer]
         num_decoder_layers = p.num_transformer_layers
+
+      tf.logging.info('Constructed decoder sublayers')
+      #################################################################################
       dec = b.DecoderLayerStack(
           'decoder',
           decoder_sub_layers,
@@ -3215,14 +3226,21 @@ class UniTransformer(base_model.BaseTask):
           spmd_pipeline_microbatches=p.num_spmd_pipeline_microbatches)
     dec.params_init = py_utils.WeightInit.Xavier(scale=1.0, seed=0)
 
+    tf.logging.info('################Creates emb_w split################')
     emb_w_split = b.MeshSplit('w_split', b.params.emb_w_split)
+    tf.logging.info('################Creates dec_out split################')
     dec_out_split = b.MeshSplit('dec_out_split',
                                 b._AdjustMSplit(b.params.blm_split[-3:], 2))
+    tf.logging.info('################Creates logits split################')
     logits_split = b.MeshSplit('logits_split', b.params.logits_split)
 
+    tf.logging.info('################Creates dec child################')
     self.CreateChild('dec', dec)
+    tf.logging.info('################Creates emb_w_split child################')
     self.CreateChild('emb_w_split', emb_w_split)
+    tf.logging.info('################Creates dec_out_split child################')
     self.CreateChild('dec_out_split', dec_out_split)
+    tf.logging.info('################Creates logits_split child################')
     self.CreateChild('logits_split', logits_split)
 
   def _ComputeDecoderInput(self, theta, input_batch):
