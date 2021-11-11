@@ -507,6 +507,7 @@ class MoEBuilder(builder.Base):
     layer_input_keys = self._DecoderLayerInMapKeys
     layer_inputs = 'x,' + ','.join(['i.' + key for key in layer_input_keys[1:]])
     if norm_policy == 'pre':
+      tf.logging.info('norm_policy == pre')
       return self._Graph(
           name,
           ['i'],
@@ -519,6 +520,7 @@ class MoEBuilder(builder.Base):
           ('input_masked,y_dropout->o.vec', self._Add('add')),
       )
     if norm_policy == 'primer':
+      tf.logging.info('norm_policy == primer')
       indx = int(name[-3:])
       if indx % 2 == 0:
         return self._Graph(
@@ -533,6 +535,7 @@ class MoEBuilder(builder.Base):
             ('input_masked,y_dropout->o.vec', self._Add('add')),
         )
       else:
+        tf.logging.info('norm_policy == else')
         return self._Graph(
             name,
             ['i'],
