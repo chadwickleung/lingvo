@@ -860,16 +860,13 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
       **kwargs: Keyword args passed to `.py_utils.CreateVariable`.
     """
     if self.params.device_mesh is not None:
-      if var_params is None:
-        # If it was empty, messed up!
-        tf.logging.info('################var_params is None################')
-
-        # Chadwick: Removed the following if statement to pass the check
-      # if (len([dim for dim in var_params.shape if dim > 1]) > 1 and
-      #     var_params.tensor_split_dims_mapping is None):
-      #   tf.logging.warning(
-      #       'tensor_split_dims_mapping missing for %s.%s: shape=%s', self.path,
-      #       name, var_params.shape)
+      tf.logging.info('################Inspect var_params################')
+      tf.logging.info(var_params)
+      if (len([dim for dim in var_params.shape if dim > 1]) > 1 and
+          var_params.tensor_split_dims_mapping is None):
+        tf.logging.warning(
+            'tensor_split_dims_mapping missing for %s.%s: shape=%s', self.path,
+            name, var_params.shape)
     if self._is_variable_free:
       raise ValueError('Cannot create variable in variable free layer.')
     if self._create_variables_status == _CreateLayerVariablesStatus.COMPLETED:
