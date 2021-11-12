@@ -113,7 +113,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             model_dim=self.MODEL_DIM,
             attention_num_heads=self.NUM_HEADS,
             ff_dim=self.HIDDEN_DIM,
-            attention_combine_dims=True)
+            attention_combine_dims=True),
             # moe_hidden_dim = self.MOE_HIDDEN_DIM),
 
         batch_size=batch_size_per_tf_replica,
