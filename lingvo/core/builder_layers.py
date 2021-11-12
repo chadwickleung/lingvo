@@ -902,7 +902,11 @@ class GraphLayer(base_layer.BaseLayer):
 
   def __init__(self, params):
     super().__init__(params)
+    tf.logging.info('################Using GraphLayer init method################')
     p = self.params
+    tf.logging.info('################')
+    tf.logging.info('%s', p.ToText())
+    tf.logging.info('################')
     assert p.name
     assert p.input_endpoints
     self._seq = []

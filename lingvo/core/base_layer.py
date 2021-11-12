@@ -122,6 +122,7 @@ def _BaseLayerInitWrapper(func):  # pylint: disable=invalid-name
     stack.append(self)
     try:
       # Calls the layer's real __init__ method.
+      tf.logging.info('################Tries to call the layer real init method################')
       func(self, *args, **kwargs)
       if len(stack) > 1:
         # Records the fact stack[-2] just created a sub-layer self.
@@ -176,6 +177,7 @@ class BaseLayerMeta(type):
   # pylint: enable=bad-mcs-classmethod-argument
 
   def __call__(cls, *args, **kwargs):
+    tf.logging.info('################Trying to create dec child################')
     self = super().__call__(*args, **kwargs)
     # This happens after self.__init__()
     # pylint: disable=protected-access
@@ -297,6 +299,7 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
     assert issubclass(from_params.cls, BaseLayer)
     assert issubclass(to_params.cls, BaseLayer)
     # Copy-over the BaseLayer params.
+    tf.logging.info('################Copy over the BaseLayer params, dec################')
     if to_params.dtype == tf.float32:
       to_params.dtype = from_params.dtype
     if to_params.fprop_dtype is None:
@@ -857,6 +860,9 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
       **kwargs: Keyword args passed to `.py_utils.CreateVariable`.
     """
     if self.params.device_mesh is not None:
+      if var_params is None:
+        # If it was empty, messed up!
+        tf.logging.info('################var_params is None################')
       if (len([dim for dim in var_params.shape if dim > 1]) > 1 and
           var_params.tensor_split_dims_mapping is None):
         tf.logging.warning(
@@ -1051,6 +1057,7 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
       raise ValueError('Attempting to call CreateChild outside of __init__.')
     self._CheckName(name)
     p = self.CopyBaseParams(self.params, params.Copy())
+    tf.logging.info(p)
     if not p.name:
       p.name = name
     child = p.Instantiate()
