@@ -1056,7 +1056,7 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
       raise ValueError('Attempting to call CreateChild outside of __init__.')
     self._CheckName(name)
     p = self.CopyBaseParams(self.params, params.Copy())
-    tf.logging.info(p)
+    # tf.logging.info(p)
     if not p.name:
       p.name = name
     child = p.Instantiate()

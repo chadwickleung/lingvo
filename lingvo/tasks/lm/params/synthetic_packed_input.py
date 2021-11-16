@@ -77,7 +77,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
   USE_REPEAT_LAYER = False
   TRAIN_STEPS_PER_LOOP = 100
   MOE = True
-  MOE_HIDDEN_DIM = 8192
+  MOE_HIDDEN_DIM = MODEL_DIM * 2
 
   def Task(self):
     # tokens per batch per replica (~64 cores)
