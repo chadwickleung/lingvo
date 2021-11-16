@@ -568,6 +568,7 @@ class MoEBuilder(builder.Base):
                         spmd_pipeline_microbatches=None):
     """Clean DecoderLayerStack, similar to EncoderLayerStack."""
 
+    tf.logging.info('################Called this DecoderLayerStack################')
     def _DecoderLayer(n, p):
       return self.DecoderLayer(
           n,
@@ -3212,6 +3213,7 @@ class UniTransformer(base_model.BaseTask):
         num_decoder_layers = p.num_transformer_layers // 2
       else:
         tf.logging.info('################NOT MoE################')
+        decoder_sub_layers = [atten_layer, ffw_layer]
         decoder_sub_layers = [atten_layer, ffw_layer]
         num_decoder_layers = p.num_transformer_layers
 
