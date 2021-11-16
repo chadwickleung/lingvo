@@ -61,7 +61,7 @@ class VarLayer(base_layer.BaseLayer):
 
   def __init__(self, params):
     super().__init__(params)
-    tf.logging.info('################Using VarLayer to create dec child################')
+    # tf.logging.info('################Using VarLayer to create child################')
     for k, v in self.params.weights:
       vp = v.Copy()
       if vp.init is None:
