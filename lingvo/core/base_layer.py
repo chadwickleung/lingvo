@@ -122,7 +122,7 @@ def _BaseLayerInitWrapper(func):  # pylint: disable=invalid-name
     stack.append(self)
     try:
       # Calls the layer's real __init__ method.
-      tf.logging.info('################Tries to call the layer real init method################')
+      # tf.logging.info('################Tries to call the layer real init method################')
       func(self, *args, **kwargs)
       if len(stack) > 1:
         # Records the fact stack[-2] just created a sub-layer self.
@@ -177,7 +177,7 @@ class BaseLayerMeta(type):
   # pylint: enable=bad-mcs-classmethod-argument
 
   def __call__(cls, *args, **kwargs):
-    tf.logging.info('################Trying to create dec child################')
+    # tf.logging.info('################Trying to create child################')
     self = super().__call__(*args, **kwargs)
     # This happens after self.__init__()
     # pylint: disable=protected-access
@@ -299,7 +299,7 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
     assert issubclass(from_params.cls, BaseLayer)
     assert issubclass(to_params.cls, BaseLayer)
     # Copy-over the BaseLayer params.
-    tf.logging.info('################Copy over the BaseLayer params, dec################')
+    # tf.logging.info('################Copy over the BaseLayer params################')
     if to_params.dtype == tf.float32:
       to_params.dtype = from_params.dtype
     if to_params.fprop_dtype is None:
