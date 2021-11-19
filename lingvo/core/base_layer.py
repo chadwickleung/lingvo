@@ -1068,11 +1068,11 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
     if hasattr(self, '_disable_create_child') and self._disable_create_child:
       raise ValueError('Attempting to call CreateChild outside of __init__.')
     self._CheckName(name)
-    tf.logging.info('Before copy')
-    tf.logging.info(params)
+    # tf.logging.info('Before copy')
+    # tf.logging.info(params)
     p = self.CopyBaseParams(self.params, params.Copy())
-    tf.logging.info('After copy')
-    tf.logging.info(p)
+    # tf.logging.info('After copy')
+    # tf.logging.info(p)
     if not p.name:
       p.name = name
     child = p.Instantiate()
