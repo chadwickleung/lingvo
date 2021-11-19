@@ -2265,6 +2265,8 @@ def Top2Gating(w,
       combining expert outputs.
     - aux_loss: auxiliary loss, equalizing the expert assignment ratios.
   """
+  tf.logging.info('################################################################')
+  tf.logging.info('################Test logging statement################')
   orig_inputs = inputs
   if not local_dispatch:
     inputs = tf.reshape(inputs, [1, inputs.shape[0] * inputs.shape[1], -1])

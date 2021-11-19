@@ -369,7 +369,7 @@ class MoEBuilder(builder.Base):
     )
 
   def Embedding(self, name, vocab_dim):
-    tf.logging.info('##############Saw some hints#################')
+    # tf.logging.info('##############Saw some hints#################')
     return self._Graph(
         name, ['ids'], ['outputs'],
         ('->emb', self._EmbeddingWeight('w', vocab_dim)),
@@ -1974,7 +1974,7 @@ class DenseBuilder(MoEBuilder):
     return super().DepthwiseConvAutoregressive(name, kernel_size, model_dims)
 
   def EinsumWithModelDim(self, name, equation):
-    tf.logging.info('################EinsumWithModelDim################')
+    # tf.logging.info('################EinsumWithModelDim################')
 
     def _Fn(x, y):
       return gshard_layers.EinsumWithModelDim(equation, x, y,
@@ -2023,7 +2023,7 @@ class DenseBuilder(MoEBuilder):
     return device_mesh
 
   def _MeshSplit(self, x, tensor_split_dims_mapping):
-    tf.logging.info('################Uses _MeshSplit in lambda function################')
+    # tf.logging.info('################Uses _MeshSplit in lambda function################')
     if tensor_split_dims_mapping is None:
       return x
 
@@ -2046,12 +2046,12 @@ class DenseBuilder(MoEBuilder):
         assert (d % m == 0), (x, self._device_mesh.shape,
                               tensor_split_dims_mapping)
 
-    tf.logging.info('################Calls gshard_utils.MeshSplit################')
+    # tf.logging.info('################Calls gshard_utils.MeshSplit################')
     return gshard_utils.MeshSplit(x, self._device_mesh,
                                   tensor_split_dims_mapping)
 
   def MeshSplit(self, name, tensor_split_dims_mapping):
-    tf.logging.info('################MeshSplit################')
+    # tf.logging.info('################MeshSplit################')
     return self._Fn(name,
                     lambda x: self._MeshSplit(x, tensor_split_dims_mapping))
 
@@ -2062,7 +2062,7 @@ class DenseBuilder(MoEBuilder):
     else:
       input_endpoints = self._EncoderLayerInMapKeys
     p = self.params
-    tf.logging.info('################Called MoE################')
+    # tf.logging.info('################Called MoE################')
     return self._Graph(
         name, input_endpoints, ['outputs', 'aux_loss'],
         ('vec->input_split',
@@ -2077,7 +2077,7 @@ class DenseBuilder(MoEBuilder):
 
   def _ShardedFeedForwardNetworksWeights(self, name, model_dim=None):
     """Gets the sharded weights for the two layer feedforward nets."""
-    tf.logging.info('################Calling SharedFeedForwaredNetworkWeights################')
+    # tf.logging.info('################Calling SharedFeedForwaredNetworkWeights################')
     p = self.params
     device_mesh = self._device_mesh
     if model_dim is None:
@@ -2117,7 +2117,7 @@ class DenseBuilder(MoEBuilder):
 
   def _ShardedMoEPositionWiseFeedForwardNetworks(self, name):
     """Simple MoE FFN with xla_sharding."""
-    tf.logging.info('################Called _ShardedMoEPositionWiseFeedForwardNetworks################')
+    # tf.logging.info('################Called _ShardedMoEPositionWiseFeedForwardNetworks################')
     p = self.params
     num_groups = p.num_groups or p.num_devices
 
@@ -2675,7 +2675,7 @@ class DenseBuilder(MoEBuilder):
     else:
       input_endpoints = self._EncoderLayerInMapKeys
 
-    tf.logging.info('##############Saw some hints#################')
+    tf.logging.info('##############Using MoEGated#################')
 
     return self._Graph(
         name, input_endpoints, ['outputs', 'aux_loss'],
@@ -3011,7 +3011,6 @@ class RecurrentDenseBuilderParallelDecode(DenseBuilder):
     del norm_type, norm_policy
     p = self.params
     assert p.deterministic_dropout
-    tf.logging.info('################Hints################')
     stack = [
         ('i.vec->inputs_split',
          self.MeshSplit('inputs_split', self._AdjustMSplit(p.blm_split, 2))),
@@ -3142,7 +3141,7 @@ class UniTransformer(base_model.BaseTask):
       assert not p.gated_ffn_activation, p.gated_ffn_activation
       gated_ffn_activation = None
 
-    tf.logging.info('################First call to Embedding################')
+    # tf.logging.info('################First call to Embedding################')
     dec_emb = b.Embedding('dec_emb', tgt_vocab_size)
     self.CreateChild('dec_emb', dec_emb)
 
@@ -3200,9 +3199,10 @@ class UniTransformer(base_model.BaseTask):
         ffw_layer = b.DenseReluDenseGated(
             'dense_relu_dense', gated_ffn_activation, decoder=True)
       if p.moe:
-        # TODO: What is the difference between MoEGated and MoE?
+        # Question: What is the difference between MoEGated and MoE?
         tf.logging.info('################MoE################')
         if p.moe_gated_gelu:
+          # TODO: Should be using MoEGated now
           tf.logging.info('################MoE gated################')
           moe_layer = b.MoEGated('moe', decoder=True)
         else:
