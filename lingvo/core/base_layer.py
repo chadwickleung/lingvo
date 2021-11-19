@@ -114,8 +114,10 @@ def _BaseLayerInitWrapper(func):  # pylint: disable=invalid-name
     stack = _LAYER_STACK.stack
     if stack and stack[-1] is self:
       # Short circuit if called multiple times (eg. super() chain).
-      for arg in args:
-        tf.logging.info(arg)
+      
+      # Confirmed: Got None in shape
+      # for arg in args:
+      #   tf.logging.info(arg)
       func(self, *args, **kwargs)
       return
 
@@ -170,6 +172,7 @@ class BaseLayerMeta(type):
     if '__init__' not in dct:
 
       def TrivialInit(self, params):
+        tf.logging.info(params.weights[1])
         super(cls, self).__init__(params)  # pylint: disable=bad-super-call
 
       cls.__init__ = TrivialInit
