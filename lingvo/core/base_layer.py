@@ -127,6 +127,8 @@ def _BaseLayerInitWrapper(func):  # pylint: disable=invalid-name
     try:
       # Calls the layer's real __init__ method.
       # tf.logging.info('################Tries to call the layer real init method################')
+      for arg in args:
+        tf.logging.info(arg)
       func(self, *args, **kwargs)
       if len(stack) > 1:
         # Records the fact stack[-2] just created a sub-layer self.
@@ -172,7 +174,8 @@ class BaseLayerMeta(type):
     if '__init__' not in dct:
 
       def TrivialInit(self, params):
-        tf.logging.info(params)
+        # Confirmed: Got None in shape already
+        # tf.logging.info(params)
         super(cls, self).__init__(params)  # pylint: disable=bad-super-call
 
       cls.__init__ = TrivialInit
