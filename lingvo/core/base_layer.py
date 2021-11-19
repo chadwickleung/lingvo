@@ -172,7 +172,7 @@ class BaseLayerMeta(type):
     if '__init__' not in dct:
 
       def TrivialInit(self, params):
-        tf.logging.info(params.weights[1])
+        tf.logging.info(params)
         super(cls, self).__init__(params)  # pylint: disable=bad-super-call
 
       cls.__init__ = TrivialInit
