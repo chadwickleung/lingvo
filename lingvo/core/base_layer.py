@@ -860,6 +860,7 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
       **kwargs: Keyword args passed to `.py_utils.CreateVariable`.
     """
     tf.logging.info(self.params.device_mesh)
+    tf.logging.info(name)
     if self.params.device_mesh is not None:
       tf.logging.info('################Inspect var_params################')
       tf.logging.info(var_params)

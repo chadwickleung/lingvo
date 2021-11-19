@@ -69,6 +69,7 @@ class VarLayer(base_layer.BaseLayer):
       # Skip creation if it's already in some collection
       if (not self.params.shared_var_collection_suffix or
           self._get_var_from_collection(vp) is None):
+        tf.logging.info(vp)
         self.CreateVariable(k, vp)
     if self.params.shared_var_collection_suffix:
       self.InstantiateVariables()
