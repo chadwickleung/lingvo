@@ -63,6 +63,8 @@ class VarLayer(base_layer.BaseLayer):
     super().__init__(params)
     # tf.logging.info('################Using VarLayer to create child################')
     for k, v in self.params.weights:
+      tf.logging.info('Original, non-copied version')
+      tf.logging.info(v)
       vp = v.Copy()
       if vp.init is None:
         vp.init = self.params.params_init
@@ -75,7 +77,7 @@ class VarLayer(base_layer.BaseLayer):
       self.InstantiateVariables()
 
   def FProp(self, theta, *args, **kwargs):
-
+    tf.logging.info('Have some TODO')
     def MaybeCastToFPropDtype(x):
       if x is None or not x.dtype.is_floating or x.dtype == self._params.fprop_dtype:
         return x
