@@ -63,15 +63,16 @@ class VarLayer(base_layer.BaseLayer):
     super().__init__(params)
     # tf.logging.info('################Using VarLayer to create child################')
     for k, v in self.params.weights:
-      tf.logging.info('Original, non-copied version')
-      tf.logging.info(v)
+      # Confirmed: v.shape already has None as first element
+      # tf.logging.info('Original, non-copied version')
+      # tf.logging.info(v)
       vp = v.Copy()
       if vp.init is None:
         vp.init = self.params.params_init
       # Skip creation if it's already in some collection
       if (not self.params.shared_var_collection_suffix or
           self._get_var_from_collection(vp) is None):
-        tf.logging.info(vp)
+        # tf.logging.info(vp)
         self.CreateVariable(k, vp)
     if self.params.shared_var_collection_suffix:
       self.InstantiateVariables()
