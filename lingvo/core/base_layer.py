@@ -115,9 +115,7 @@ def _BaseLayerInitWrapper(func):  # pylint: disable=invalid-name
     if stack and stack[-1] is self:
       # Short circuit if called multiple times (eg. super() chain).
       for arg in args:
-        if arg.weights:
-          k, v = arg.weights
-          tf.logging.info(v)
+        tf.logging.info(arg)
       func(self, *args, **kwargs)
       return
 
