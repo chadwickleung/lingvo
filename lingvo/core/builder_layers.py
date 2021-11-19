@@ -931,7 +931,7 @@ class GraphLayer(base_layer.BaseLayer):
         if not name:
           name = '%s_%02d' % (sig.outputs[0], i)
           sub.name = name
-        tf.logging.info(sub)
+        # tf.logging.info(sub)
         self.CreateChild(name, sub)
       reference_name = lambda sub: sub.name
 
