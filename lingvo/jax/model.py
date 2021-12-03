@@ -212,11 +212,11 @@ class BaseTask(base_layer.BaseLayer):
       return None
     else:
       learners = self.learners
-      grad_txs = [x.grad_tx for x in learners]
+      grad_txs = [x.get_grad_tx(mdl_vars=var_weight_params) for x in learners]
       for grad_tx in grad_txs:
         assert isinstance(grad_tx, optimizers.ShardedGradientTransformation)
       opt_var_weight_params = [
-          x.init_partition_spec(var_weight_params) for x in grad_txs
+          x.init_partition_spec(mdl_vars=var_weight_params) for x in grad_txs
       ]
       var_partition_specs = base_layer.var_partition_specs(
           var_weight_params,
@@ -252,7 +252,7 @@ class BaseTask(base_layer.BaseLayer):
     mdl_vars = tf.nest.map_structure(lambda x: x, mdl_vars)
     var_weight_params = tf.nest.map_structure(lambda x: x, var_weight_params)
     learners = self.learners
-    grad_txs = [x.grad_tx for x in learners]
+    grad_txs = [x.get_grad_tx(mdl_vars=mdl_vars) for x in learners]
     tf.nest.assert_same_structure(mdl_vars, var_weight_params)
     opt_states = [x.init(mdl_vars) for x in grad_txs]
     return TrainState(
@@ -327,14 +327,14 @@ class LanguageModel(BaseTask):
     num_preds = predictions.total_weight
     mean_acc = jnp.sum(
         (labels == predicted_labels) * weights) / jnp.maximum(num_preds, 1)
-    metric_weight = jnp.array(1.0, predictions.avg_xent.dtype)
+    metric_weight = jnp.array(num_preds, predictions.avg_xent.dtype)
     metrics = py_utils.NestedMap(
         total_loss=(predictions.total_loss, metric_weight),
         avg_xent=(predictions.avg_xent, metric_weight),
-        aux_loss=(predictions.aux_loss, metric_weight),
+        aux_loss=(predictions.aux_loss,
+                  jnp.array(1.0, predictions.aux_loss.dtype)),
         log_pplx=(predictions.avg_xent, metric_weight),
-        fraction_of_correct_next_step_preds=(mean_acc,
-                                             jnp.array(1.0, mean_acc.dtype)),
+        fraction_of_correct_next_step_preds=(mean_acc, metric_weight),
         num_predictions=(num_preds, jnp.array(1.0, num_preds.dtype)),
     )
     per_example_output = py_utils.NestedMap()

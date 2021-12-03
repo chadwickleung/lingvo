@@ -26,16 +26,20 @@ RUN for python in python3.7 python3.8 python3.9; do \
       $python get-pip.py && \
       $python -m pip install --upgrade pip setuptools auditwheel && \
       $python -m pip install --upgrade \
+        absl-py \
         attrs \
-        dataclasses \
+        clu \
+        flax \
         graph-compression-google-research \
         grpcio \
+        jax \
         matplotlib \
         mock \
         model-pruning-google-research \
         numpy \
-        sentencepiece \
+        optax \
         scipy \
+        sentencepiece \
         sympy \
         twine && \
       $python -m pip install tensorflow tensorflow-datasets tensorflow-text; \

@@ -23,6 +23,7 @@ pytype_strict_library(
         ":linears",
         ":ngrammer",
         ":normalizations",
+        ":pipeline",
         ":poolings",
         ":recurrent",
         ":repeats",
@@ -51,6 +52,7 @@ pytype_strict_library(
     deps = [
         ":embedding_softmax",
         ":stochastics",
+        # Implicit absl.logging dependency.
         # Implicit jax dependency.
         "//lingvo/jax:base_layer",
         "//lingvo/jax:py_utils",
@@ -77,7 +79,9 @@ pytype_strict_library(
     srcs_version = "PY3",
     deps = [
         ":activations",
+        ":linears",
         ":normalizations",
+        ":stochastics",
         # Implicit jax dependency.
         "//lingvo/jax:base_layer",
         "//lingvo/jax:py_utils",
@@ -146,6 +150,19 @@ pytype_strict_library(
     srcs = ["normalizations.py"],
     srcs_version = "PY3",
     deps = [
+        # Implicit jax dependency.
+        "//lingvo/jax:base_layer",
+        "//lingvo/jax:py_utils",
+        "//lingvo/jax:pytypes",
+    ],
+)
+
+pytype_strict_library(
+    name = "pipeline",
+    srcs = ["pipeline.py"],
+    srcs_version = "PY3",
+    deps = [
+        ":recurrent",
         # Implicit jax dependency.
         "//lingvo/jax:base_layer",
         "//lingvo/jax:py_utils",
@@ -248,7 +265,6 @@ pytype_strict_library(
         ":attentions",
         ":embedding_softmax",
         ":linears",
-        ":ngrammer",
         ":normalizations",
         ":recurrent",
         ":repeats",
@@ -429,7 +445,7 @@ py_strict_test(
     name = "transformers_test",
     srcs = ["transformers_test.py"],
     python_version = "PY3",
-    shard_count = 6,
+    shard_count = 16,
     srcs_version = "PY3",
     deps = [
         ":attentions",

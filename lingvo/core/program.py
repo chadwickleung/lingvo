@@ -756,6 +756,12 @@ class EvalProgram(BaseProgram):
       return self._eval_metrics.FinalizeMetrics(loop_result)
 
     if py_utils.IsEagerMode():
+      if self._task.input.params.resettable:
+        tf.logging.info('Resetting input_generator.')
+        # Reset the iterator within `EvalFunc` to ensure it gets run everytime
+        # the `tf.function` is executed in Eager mode.
+        self._task.input.Reset()
+
       # Run the infeed loop in the same function that runs the training loop
       # so that infeed enqueue/dequeue ops are created by the same
       # InfeedQueue.
@@ -810,18 +816,9 @@ class EvalProgram(BaseProgram):
       mlp_log.mlperf_print(
           'eval_start', None, metadata={'epoch_num': mlperf_epoch_num})
 
-    if self._task.input.params.resettable:
+    if self._task.input.params.resettable and not py_utils.IsEagerMode():
       tf.logging.info('Resetting input_generator.')
       self._task.input.Reset(sess)
-      if py_utils.IsEagerMode():
-        # In eager mode, after resetting the input generator, we need to
-        # re-trace the tf.function to ensure it uses the new iterator.
-        # See TFDatasetSource::Reset().
-        # TODO(b/202289733): How to reset the iterator in-place to avoid needing
-        # to re-trace tf.function which can be expensive (results in a TPU
-        # recompile each time)?
-        self.tpu_outs = (
-            tf.function(autograph=False)(self.EvalFunc).get_concrete_function())
 
     if py_utils.IsEagerMode():
       values = self.tpu_outs()
@@ -1012,12 +1009,15 @@ class DecodeProgram(BaseProgram):
       with py_utils.OpportunisticVariableReuseScope(True):
         self._model = self._InstantiateTaskModel(self._task_params)
       self._task = self._model.GetTask()
+      # We likely still need to initialize them, otherwise there is no way to
+      # know the tensor_spec of the iterators for capturing
       self._task.input.TpuSetup(cpu_passthrough=True)
 
       if py_utils.IsEagerMode():
-        self.tpu_outs = (
-            tf.function(autograph=False)(
-                self.DecodeFunc).get_concrete_function())
+        with py_utils.ExperimentalIteratorCapture():
+          self.tpu_outs = (
+              tf.function(autograph=False)(
+                  self.DecodeFunc).get_concrete_function())
       else:
         self.tpu_outs = self.DecodeFunc()
 
@@ -1119,7 +1119,8 @@ class DecodeProgram(BaseProgram):
     # Provide train_executions_per_eval as a possible option for email.
     options = base_model.DecodeEmailOptions(
         job_name=os.path.basename(self._program_dir),
-        train_executions_per_eval=self.train_executions_per_eval)
+        train_executions_per_eval=self.train_executions_per_eval,
+        global_step=global_step)
     if self.params.emails:
       try:
         self._task.EmailDecodeSummary(summaries, self.params.emails, options)
@@ -1141,16 +1142,6 @@ class DecodeProgram(BaseProgram):
     if self._task.input.params.resettable:
       tf.logging.info('Resetting input_generator.')
       self._task.input.Reset(sess)
-      if py_utils.IsEagerMode():
-        # In eager mode, after resetting the input generator, we need to
-        # re-trace the tf.function to ensure it uses the new iterator.
-        # See TFDatasetSource::Reset().
-        # TODO(b/202289733): How to reset the iterator in-place to avoid needing
-        # to re-trace tf.function which can be expensive (results in a TPU
-        # recompile each time)?
-        self.tpu_outs = (
-            tf.function(autograph=False)(
-                self.DecodeFunc).get_concrete_function())
 
     # The infeed_step_queue synchronizes the _InfeedLoop with the Decoding loop
     # (that runs _DecodeStep). As an input batch is successfully fed through
@@ -1904,6 +1895,7 @@ def _ClearSpecifiedProgram(program_list, program_cls_to_clear):
 def UpdateProgramSchedule(ps_params,
                           dataset_list,
                           train_executions_per_eval,
+                          train_steps_per_loop,
                           eval_steps_per_loop,
                           decode_steps_per_loop,
                           decode_summary_emails=None):
@@ -1917,6 +1909,8 @@ def UpdateProgramSchedule(ps_params,
       datasets in ps_params.
     train_executions_per_eval: Optional[int], if not None, it will override
       train_executions_per_eval in ps_params.
+    train_steps_per_loop: Optional[int], if not None, it will override
+      train program's steps_per_loop.
     eval_steps_per_loop: Optional[int], if not None, it will override all the
       eval programs steps_per_loop. Currently list not supported.
     decode_steps_per_loop: Optional[int], if not None, it will override all the
@@ -1966,6 +1960,9 @@ def UpdateProgramSchedule(ps_params,
 
   if train_executions_per_eval is not None:
     ps_params.train_executions_per_eval = train_executions_per_eval
+
+  if train_steps_per_loop is not None:
+    ps_params.train_program.steps_per_loop = train_steps_per_loop
 
   if eval_steps_per_loop is not None:
     if eval_steps_per_loop == 0:

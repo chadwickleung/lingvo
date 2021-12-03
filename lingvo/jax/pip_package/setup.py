@@ -23,7 +23,7 @@ from setuptools.dist import Distribution
 import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 __version__ = '0.11.0'
-project_name = 'lingvo'
+project_name = 'lingvo-jax'
 if '--project_name' in sys.argv:
   project_name_idx = sys.argv.index('--project_name')
   project_name = sys.argv[project_name_idx + 1]
@@ -31,16 +31,22 @@ if '--project_name' in sys.argv:
   sys.argv.pop(project_name_idx)
 
 REQUIRED_PACKAGES = [
+    'absl-py',
     'attrs',
-    'dataclasses',
+    'clu',
+    'flax',
     'ipykernel',
+    'jax',
     'jupyter',
     'jupyter_http_over_ws',
     'graph-compression-google-research',
     'matplotlib',
     'model-pruning-google-research',
+    'numpy',
+    'optax',
     'Pillow',
     'protobuf',
+    'scipy',
     'sentencepiece',
     'sklearn',
     'sympy',
@@ -73,7 +79,7 @@ class InstallCommand(install):
 setup(
     name=project_name,
     version=__version__,
-    description=('Lingvo libraries.'),
+    description='Lingvo JAX libraries.',
     author='Lingvo Authors',
     author_email='lingvo-bot@google.com',
     packages=find_namespace_packages(

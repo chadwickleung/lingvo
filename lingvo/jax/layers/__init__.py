@@ -29,6 +29,8 @@ from lingvo.jax.layers.augmentations import MaskedLmDataAugmenter
 
 from lingvo.jax.layers.convolutions import Conv2D
 from lingvo.jax.layers.convolutions import ConvBNAct
+from lingvo.jax.layers.convolutions import DepthwiseConv1D
+from lingvo.jax.layers.convolutions import LightConv1D
 
 from lingvo.jax.layers.embedding_softmax import PositionalEmbedding
 from lingvo.jax.layers.embedding_softmax import SingleShardEmbedding
@@ -50,6 +52,8 @@ from lingvo.jax.layers.ngrammer import VQNgrammer
 from lingvo.jax.layers.normalizations import BatchNorm
 from lingvo.jax.layers.normalizations import compute_moments
 from lingvo.jax.layers.normalizations import LayerNorm
+
+from lingvo.jax.layers.pipeline import LayerwiseShardablePipelined
 
 from lingvo.jax.layers.poolings import GlobalPooling
 from lingvo.jax.layers.poolings import Pooling

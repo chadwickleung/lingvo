@@ -29,7 +29,6 @@ from lingvo.jax.layers import activations as activations_lib
 from lingvo.jax.layers import attentions
 from lingvo.jax.layers import embedding_softmax
 from lingvo.jax.layers import linears
-from lingvo.jax.layers import ngrammer
 from lingvo.jax.layers import normalizations
 from lingvo.jax.layers import recurrent
 from lingvo.jax.layers import repeats
@@ -713,6 +712,11 @@ class Transformer(base_layer.BaseLayer):
     p.Define('mask_self_attention', False, 'If True, use causal mask.')
     p.Define('cross_attention', False, 'If True, perform cross'
              'encoder-decoder attention.')
+    p.Define(
+        'cross_atten_tpl', None, 'Optional cross attention params template'
+        'that can be set when cross attention is enabled. If cross'
+        'attention is enabled and this is set to None, then cross'
+        'attention params will be inherited from tr_atten_tpl.')
     p.Define('ln_tpl', normalizations.LayerNorm.Params(), 'Layer norm params.')
     p.Define('tr_atten_tpl',
              attentions.DotProductAttention.Params().Set(),
@@ -754,14 +758,23 @@ class Transformer(base_layer.BaseLayer):
       params.input_dims = p.input_dims
       self.create_child('cross_layer_norm', params)
 
-      params = p.tr_atten_tpl.Copy()
-      params.name = 'multihead_self_atten'
+      if p.cross_atten_tpl is not None:
+        params = p.cross_atten_tpl.Copy()
+      else:
+        params = p.tr_atten_tpl.Copy()
+      params.name = 'multihead_cross_atten'
       params.input_dim = p.input_dims
       params.hidden_dim = p.input_dims
       params.num_heads = p.num_heads
       params.atten_dropout_prob = p.atten_dropout_prob
       # Note that cross attention should not use any position embeddings.
-      params.use_rotary_position_emb = False
+      if params.use_rotary_position_emb:
+        raise ValueError('Rotary position embedding should not be enabled for '
+                         'cross attention.')
+      # Note that cross attention should not use depth-wise convolution.
+      if params.dconv_qkv:
+        raise ValueError('Depth-wise convolution should not be enabled for '
+                         'cross attention.')
       self.create_child('cross_attention', params)
 
     # Initialize feed-forward layer
@@ -1407,11 +1420,11 @@ class TransformerLm(base_layer.BaseLayer):
     p.Define('packed_input', False, 'Whether the inputs are packed.')
     p.Define('aux_loss_weight', 0.0, 'Weight of the aux loss for MoE layers.')
     p.Define('masked_lm', False, 'Whether this is BERT style masked LM.')
-    p.Define('use_ngrammer', False, 'Whether to use n-grammer embeddings.')
     p.Define(
-        'ngrammer_tpl', ngrammer.Ngrammer.Params(),
-        'Params for the N-Grammer layer. This param is shared between'
-        'the Ngrammer layer as well as the VQNgrammer layer.')
+        'ngrammer_tpl', None,
+        'Params for the Ngrammer layer. This param is shared between'
+        'the Ngrammer layer as well as the VQNgrammer layer. If this is None'
+        'then the Ngrammer layer is not used.')
     return p
 
   @classmethod
@@ -1519,7 +1532,7 @@ class TransformerLm(base_layer.BaseLayer):
       self.create_child('position_emb', params)
 
     # Ngrammer layer.
-    if p.use_ngrammer:
+    if p.ngrammer_tpl is not None:
       self.create_child('ngrammer', p.ngrammer_tpl)
 
     # Transformer layers
@@ -1658,7 +1671,7 @@ class TransformerLm(base_layer.BaseLayer):
             jnp.arange(seq_length, dtype=jnp.int32)[None, :], [batch, 1])
 
       # Add ngrams.
-      if p.use_ngrammer:
+      if p.ngrammer_tpl is not None:
         input_emb = self.ngrammer.fprop(
             theta.ngrammer,
             input_ids=inputs,
@@ -1716,6 +1729,10 @@ class TransformerLm(base_layer.BaseLayer):
       xent_output: A `.NestedMap` object containing the log probabilities and
         probabilities.
     """
+    p = self.params
+    # Extend step should only be called with causal LM.
+    assert not p.masked_lm
+
     if len(inputs.shape) == 1:
       inputs = inputs[:, jnp.newaxis]
 
@@ -1723,18 +1740,22 @@ class TransformerLm(base_layer.BaseLayer):
     time_step = cached_states.step
 
     # Add Ngrammer layer if applicable.
-    if self.params.use_ngrammer:
+    if p.ngrammer_tpl is not None:
       input_emb = self.ngrammer.fprop(
           theta.ngrammer, inputs, input_emb, paddings=None, segment_pos=None)
       inputs = inputs[:, -1][:, jnp.newaxis]
       input_emb = input_emb[:, -1, :][:, jnp.newaxis, :]
 
-    # During autoregressive decoding inputs are not packed.
-    segment_pos = jnp.zeros((inputs.shape[0], 1)) + time_step
-    position_emb = self.position_emb.fprop(
-        theta.position_emb, seq_length=1, position=segment_pos)
+    if p.position_emb_tpl is not None:
+      # During autoregressive decoding inputs are not packed.
+      segment_pos = jnp.zeros((inputs.shape[0], 1)) + time_step
+      position_emb = self.position_emb.fprop(
+          theta.position_emb, seq_length=1, position=segment_pos)
 
-    inputs = input_emb + position_emb
+      inputs = input_emb + position_emb
+    else:
+      inputs = input_emb
+
     updated_cache, outputs = self.transformer.extend_step(
         theta.transformer,
         cached_states.transformer,

@@ -305,6 +305,7 @@ pytype_strict_library(
     srcs = ["summary_utils.py"],
     srcs_version = "PY3",
     deps = [
+        ":base_layer",
         ":pytypes",
         ":train_states",
         # Implicit absl.logging dependency.
@@ -368,6 +369,7 @@ pytype_strict_library(
         ":model",
         ":py_utils",
         ":pytypes",
+        ":summary_utils",
         ":train_states",
         # Implicit absl.logging dependency.
         # Implicit jax dependency.
@@ -394,10 +396,12 @@ py_strict_test(
         ":optimizers",
         ":py_utils",
         ":schedules",
+        # Implicit absl.logging dependency.
         # Implicit absl.testing.absltest dependency.
         # Implicit absl.testing.parameterized dependency.
         # Implicit jax dependency.
         # Implicit numpy dependency.
+        # Implicit tensorflow dependency.
     ],
 )
 

@@ -15,6 +15,8 @@
 # ==============================================================================
 """Base classes for the lingvo Jax input layers."""
 
+from typing import List
+
 from lingvo.core import datasource
 from lingvo.jax import py_utils
 from lingvo.jax import pytypes
@@ -61,6 +63,14 @@ class BaseInputParams(InstantiableParams):
         ' all variant p.infeed_host_index instances raise after the same number'
         ' of calls to get_next() to ensure synchronization across hosts. If not'
         ' set, get_next() must never raise.')
+    self.Define(
+        'eval_loop_num_batches', 1,
+        'Num of batches to process per eval loop. Must be >= 1. This value'
+        ' is ignored if reset_for_eval is set True, in which case, this value'
+        ' is dynamically determined by the number of available batches. If '
+        ' reset_for_eval is set to False, then each eval loop will process'
+        ' this many batches. Metrics over those batches will be aggregated'
+        ' and then reported.')
     self.Define('is_training', False,
                 'Whether or not this dataset is used for model traning.')
 
@@ -104,6 +114,21 @@ class BaseInput:
 
   def reset(self) -> None:
     pass
+
+  def ids_to_strings(self, ids: pytypes.NpTensor,
+                     lengths: pytypes.NpTensor) -> List[str]:
+    """Converts int ids into strings.
+
+    Args:
+      ids: A matrix of shape [batch, seqlen], each row is a sequence to be
+        converted.
+      lengths: A vector of shape [batch]. lens[i] is the sequence length of the
+        i-th row. Only the first lens[i] tokens in ids[i, :] are valid tokens.
+
+    Returns:
+      A list strings of shape [batch]. The converted texts.
+    """
+    raise NotImplementedError
 
 
 class LingvoInputAdaptor(BaseInput):
@@ -190,3 +215,9 @@ class LingvoInputAdaptor(BaseInput):
       return
     # reinstantiate the input and retrace self._get_batch.
     self._initialize()
+
+  def ids_to_strings(self, ids: pytypes.NpTensor,
+                     lengths: pytypes.NpTensor) -> List[str]:
+    """Converts int ids into strings."""
+    bytes_list = self.input.IdsToStrings(ids, lengths).numpy()
+    return [b.decode('utf-8') for b in bytes_list]

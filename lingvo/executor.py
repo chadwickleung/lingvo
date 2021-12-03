@@ -122,6 +122,7 @@ def GetExecutorParams(model_name, cluster_params, model_registry):
         for eval_dataset_name in program_schedule_params.dataset_names:
           multi_task_eval_cfg = model_registry.GetParams(
               model_name, eval_dataset_name)
+          multi_task_eval_cfg.cluster = cluster_params
           if multi_task_train_cfg.share_model_object:
             eval_task_params = base_model.MultiTaskSubModel.Params()
             eval_task_params.task_name = k
@@ -158,6 +159,7 @@ def GetExecutorParams(model_name, cluster_params, model_registry):
         tf.logging.info('program schedule has dataset')
         task_eval_params = model_registry.GetParams(model_name,
                                                     eval_dataset_name)
+        task_eval_params.cluster = cluster_params
         task_eval_params = UnsetUnusedTrainParams(task_eval_params)
         program_schedule_params.task_dict[eval_dataset_name] = task_eval_params
 
@@ -166,7 +168,7 @@ def GetExecutorParams(model_name, cluster_params, model_registry):
   return ps_params_dict, train_cfg
 
 
-class ExecutorTpu(base_runner.BaseRunner):
+class ExecutorTpu(base_runner.GraphRunner):
   """An runner that does arbitrary multi-program execution on TPU.
 
   Overview of operation:
@@ -195,11 +197,11 @@ class ExecutorTpu(base_runner.BaseRunner):
     # Set-ed EagerMode == False in trainer.py
     if py_utils.IsEagerMode():
       assert tf.executing_eagerly()
-      tf.logging.info(f'FLAGS.tf_worker_address: {FLAGS.tf_worker_address}')
+      tf.logging.info(f'FLAGS.tf_master: {FLAGS.tf_master}')
 
       # Connect to the TPU runtime.
       resolver = tf.distribute.cluster_resolver.TPUClusterResolver(
-          FLAGS.tf_worker_address, job_name=FLAGS.worker_job[len('/job:'):])
+          FLAGS.tf_master, job_name=FLAGS.worker_job[len('/job:'):])
       tf.config.experimental_connect_to_cluster(resolver)
 
     # Confirmed: Initializes BaseRunner and prints the model params

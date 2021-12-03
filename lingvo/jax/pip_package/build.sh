@@ -76,10 +76,6 @@ if [[ "$PIP_MANYLINUX2010" == "1" ]]; then
   write_to_bazelrc "test --config=manylinux2010"
 fi
 
-# Exclude lingvo Jax from the pip package.
-# TODO(b/203463351): Add lingvo jax into a pip package.
-rm -rf lingvo/jax/
-
 # It is expected that you have git cloned this repo at the branch you want,
 # ideally in our docker.
 
@@ -88,7 +84,7 @@ bazel build ...
 # Just test the core for the purposes of the pip package.
 bazel test lingvo/core/...
 
-DST_DIR="/tmp/lingvo_pip_pkg_build"
+DST_DIR="/tmp/lingvo_jax_pip_pkg_build"
 ./pip_package/build_pip_pkg.sh "$DST_DIR" ${PYTHON_VERSION}
 # Comment the following line if you run this outside of the container.
 if [[ "${PIP_MANYLINUX2010}" == "1" ]]; then
