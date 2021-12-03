@@ -115,8 +115,8 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             ff_dim=self.HIDDEN_DIM,
             attention_combine_dims=True,
             moe_hidden_dim = self.MOE_HIDDEN_DIM,
-            e_dim = 2 if self.MOE else None,
-            c_dim = 2 if self.MOE else None),
+            e_dim = self.NUM_DEVICES_PER_SPLIT if self.MOE else None,  # this is the number of experts
+            c_dim = 2 if self.MOE else None), # this is the expert capacity
 
         batch_size=batch_size_per_tf_replica,
         sequence_length=self.SEQUENCE_LENGTH,

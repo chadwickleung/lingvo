@@ -1064,7 +1064,7 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
       name: Sub layer name which is used as the key into vars/theta.
       params: `Hyperparams` object to instantiate a layer.
     """
-    tf.logging.info('################Enter CreateChild################')
+    # tf.logging.info('################Enter CreateChild################')
     if hasattr(self, '_disable_create_child') and self._disable_create_child:
       raise ValueError('Attempting to call CreateChild outside of __init__.')
     self._CheckName(name)
@@ -1077,7 +1077,7 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
       p.name = name
     child = p.Instantiate()
     self._private_children[name] = child
-    tf.logging.info('################Leave CreateChild################')
+    # tf.logging.info('################Leave CreateChild################')
 
   def CreateChildren(
       self, name: str, params: Union[List[BaseLayerParamsT],
