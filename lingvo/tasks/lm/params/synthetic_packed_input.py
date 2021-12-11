@@ -104,7 +104,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             atten_logit_cap=self.ATTEN_LOGIT_CAP,
             attention_logits_dtype=tf.float32,
             dropout_rate=0.0,
-            num_devices=1,  # Obsolete params
+            num_devices=self.NUM_DEVICES_PER_SPLIT,  # Obsolete params, originally = 1
             attention_dropout_prob=0.0,
             attention_key_value_dim=self.ATTENTION_KEY_VALUE_DIM,
             attention_extra_logit=0.0,
@@ -115,8 +115,8 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             ff_dim=self.HIDDEN_DIM,
             attention_combine_dims=True,
             moe_hidden_dim = self.MOE_HIDDEN_DIM,
-            e_dim = self.NUM_DEVICES_PER_SPLIT if self.MOE else None,  # this is the number of experts
-            c_dim = 2 if self.MOE else None), # this is the expert capacity
+            e_dim = self.NUM_DEVICES_PER_SPLIT if self.MOE else None,  # number of experts
+            c_dim = batch_size_per_tf_replica / self.NUM_DEVICES_PER_SPLIT if self.MOE else None), # expert capacity
 
         batch_size=batch_size_per_tf_replica,
         sequence_length=self.SEQUENCE_LENGTH,

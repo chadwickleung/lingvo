@@ -2593,6 +2593,8 @@ class DenseBuilder(MoEBuilder):
     # parallel to the inputs.  You take the gelu of one of them and then
     # multiply the two componentwise.
     p = self.params
+    # Chadwick: why does it not need device mesh?
+    # TODO: try assigning device_mesh to the configured device_mesh 
     return self._ShardedVar(
         name=name,
         weights=[('wi_0',
