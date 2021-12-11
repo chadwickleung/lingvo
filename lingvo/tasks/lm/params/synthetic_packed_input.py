@@ -83,6 +83,9 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
     # tokens per batch per replica (~64 cores)
     batch_size_per_tf_replica = int(self.BATCH_DIM_PER_DEVICE *
                                     self.NUM_DEVICES_PER_SPLIT)
+    expert_capacity = batch_size_per_tf_replica // self.NUM_DEVICES_PER_SPLIT
+    if expert_capacity <= 0:
+      expert_capacity = 1
 
     p = gshard_builder.UniTransformer.Params().Set(
         gated_gelu=self.GATED_GELU,
@@ -104,7 +107,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             atten_logit_cap=self.ATTEN_LOGIT_CAP,
             attention_logits_dtype=tf.float32,
             dropout_rate=0.0,
-            num_devices=self.NUM_DEVICES_PER_SPLIT,  # Obsolete params, originally = 1
+            num_devices=1,  # Obsolete params, originally = 1
             attention_dropout_prob=0.0,
             attention_key_value_dim=self.ATTENTION_KEY_VALUE_DIM,
             attention_extra_logit=0.0,
@@ -116,7 +119,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             attention_combine_dims=True,
             moe_hidden_dim = self.MOE_HIDDEN_DIM,
             e_dim = self.NUM_DEVICES_PER_SPLIT if self.MOE else None,  # number of experts
-            c_dim = batch_size_per_tf_replica / self.NUM_DEVICES_PER_SPLIT if self.MOE else None), # expert capacity
+            c_dim = expert_capacity if self.MOE else None), # expert capacity
 
         batch_size=batch_size_per_tf_replica,
         sequence_length=self.SEQUENCE_LENGTH,
