@@ -453,7 +453,7 @@ def main(unused_argv):
   model_params = model_registry.GetParams(FLAGS.model, None)
   tf.logging.info('Found model %s', FLAGS.model)
 
-  batch_size = model_params.task.batch_size
+  batch_size = model_params.task.batch_size  # Chadwick: Can be used for batch_size record
 
   decoder = GShardLMDecodeBatch()
   decoder.init_vocab(model_params)
