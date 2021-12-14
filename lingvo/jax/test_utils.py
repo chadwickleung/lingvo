@@ -74,6 +74,37 @@ def to_tf_nmap(x_nmap: NestedMap) -> NestedMap:
   return tf.nest.map_structure(to_tf, x_nmap)
 
 
+def replace_jax_transformer_ffwd_vars_to_tf(
+    jax_initial_vars: NestedMap) -> NestedMap:
+  """Replaces JAX TransformerFeedForward vars to TF compatible vars.
+
+  Args:
+    jax_initial_vars: JAX TransformerFeedforward layer vars.
+
+  Returns:
+    tf_initial_vars which is TF compatible.
+  """
+  tf_initial_vars = jax_initial_vars.copy()
+  tf_initial_vars = py_utils.NestedMap()
+  tf_initial_vars.fflayer = py_utils.NestedMap(
+      fc=[
+          py_utils.NestedMap(
+              w=jax_initial_vars.ffn_layer1.linear.w,
+              b=jax_initial_vars.ffn_layer1.bias.b),
+          py_utils.NestedMap(
+              w=jax_initial_vars.ffn_layer2.linear.w,
+              b=jax_initial_vars.ffn_layer2.bias.b),
+      ],
+      dropout=[py_utils.NestedMap(), py_utils.NestedMap()],
+  )
+  tf_initial_vars.layer_norm = py_utils.NestedMap(
+      bias=jax_initial_vars.layer_norm.bias,
+      scale=jax_initial_vars.layer_norm.scale)
+  tf_initial_vars.residual_dropout = py_utils.NestedMap()
+  tf_initial_vars.residual_droppath = py_utils.NestedMap()
+  return tf_initial_vars
+
+
 def replace_jax_attention_vars_to_tf(
     jax_initial_vars: NestedMap,
     cross_attention: Optional[bool] = False) -> NestedMap:
@@ -262,5 +293,71 @@ def replace_jax_light_conv_vars_to_tf(jax_initial_vars: NestedMap) -> NestedMap:
   ],
                                                   axis=-1)
 
+  tf_initial_vars = to_tf_nmap(tf_initial_vars)
+  return tf_initial_vars
+
+
+def replace_jax_conformer_layer_vars_to_tf(
+    jax_initial_vars: NestedMap) -> NestedMap:
+  """Replace the JAX conformer layer vars to TF compatible vars.
+
+  Args:
+    jax_initial_vars: JAX conformer layer vars.
+
+  Returns:
+    tf_initial_vars which is TF compatible with ConformerLayer.
+  """
+
+  tf_initial_vars = py_utils.NestedMap()
+
+  tf_initial_vars.lconv = replace_jax_light_conv_vars_to_tf(
+      jax_initial_vars.lconv)
+
+  tf_initial_vars.final_ln = py_utils.NestedMap()
+  tf_initial_vars.final_ln.bias = jax_initial_vars.final_ln.bias
+  tf_initial_vars.final_ln.scale = jax_initial_vars.final_ln.scale
+
+  tf_initial_vars.fflayer_start = py_utils.NestedMap()
+  tf_initial_vars.fflayer_start.residual_dropout = jax_initial_vars.fflayer_start.residual_dropout
+  tf_initial_vars.fflayer_start.layer_norm = jax_initial_vars.fflayer_start.layer_norm
+  tf_initial_vars.fflayer_start.fflayer = py_utils.NestedMap()
+  tf_initial_vars.fflayer_start.fflayer.dropout = [
+      jax_initial_vars.fflayer_start.relu_dropout, {}
+  ]
+  tf_initial_vars.fflayer_start.fflayer.fc = [
+      py_utils.NestedMap(), py_utils.NestedMap()
+  ]
+  tf_initial_vars.fflayer_start.fflayer.fc[
+      0].w = jax_initial_vars.fflayer_start.ffn_layer1.linear.w
+  tf_initial_vars.fflayer_start.fflayer.fc[
+      0].b = jax_initial_vars.fflayer_start.ffn_layer1.bias.b
+  tf_initial_vars.fflayer_start.fflayer.fc[
+      1].w = jax_initial_vars.fflayer_start.ffn_layer2.linear.w
+  tf_initial_vars.fflayer_start.fflayer.fc[
+      1].b = jax_initial_vars.fflayer_start.ffn_layer2.bias.b
+
+  tf_initial_vars.fflayer_end = py_utils.NestedMap()
+  tf_initial_vars.fflayer_end.layer_norm = jax_initial_vars.fflayer_end.layer_norm
+  tf_initial_vars.fflayer_end.residual_dropout = jax_initial_vars.fflayer_end.residual_dropout
+  tf_initial_vars.fflayer_end.fflayer = py_utils.NestedMap()
+  tf_initial_vars.fflayer_end.fflayer.dropout = [
+      jax_initial_vars.fflayer_end.relu_dropout, {}
+  ]
+  tf_initial_vars.fflayer_end.fflayer.fc = [
+      py_utils.NestedMap(), py_utils.NestedMap()
+  ]
+  tf_initial_vars.fflayer_end.fflayer.fc[
+      0].w = jax_initial_vars.fflayer_end.ffn_layer1.linear.w
+  tf_initial_vars.fflayer_end.fflayer.fc[
+      0].b = jax_initial_vars.fflayer_end.ffn_layer1.bias.b
+  tf_initial_vars.fflayer_end.fflayer.fc[
+      1].w = jax_initial_vars.fflayer_end.ffn_layer2.linear.w
+  tf_initial_vars.fflayer_end.fflayer.fc[
+      1].b = jax_initial_vars.fflayer_end.ffn_layer2.bias.b
+
+  tf_initial_vars.trans_atten = py_utils.NestedMap()
+  tf_initial_vars.trans_atten.layer_norm = jax_initial_vars.trans_atten.norm
+  tf_initial_vars.trans_atten.residual_dropout = jax_initial_vars.trans_atten.residual_dropout
+  tf_initial_vars.trans_atten.atten = jax_initial_vars.trans_atten.core
   tf_initial_vars = to_tf_nmap(tf_initial_vars)
   return tf_initial_vars

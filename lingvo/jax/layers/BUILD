@@ -17,6 +17,7 @@ pytype_strict_library(
         ":activations",
         ":attentions",
         ":augmentations",
+        ":conformers",
         ":convolutions",
         ":embedding_softmax",
         ":flax_wrapper",
@@ -243,6 +244,7 @@ pytype_strict_library(
     srcs = ["test_layers.py"],
     srcs_version = "PY3",
     deps = [
+        ":conformers",
         ":flax_wrapper",
         ":linears",
         ":normalizations",
@@ -253,6 +255,42 @@ pytype_strict_library(
         "//lingvo/jax:model",
         "//lingvo/jax:py_utils",
         "//lingvo/jax:pytypes",
+    ],
+)
+
+py_strict_test(
+    name = "conformers_test",
+    srcs = ["conformers_test.py"],
+    python_version = "PY3",
+    srcs_version = "PY3",
+    deps = [
+        # Implicit absl.testing.absltest dependency.
+        # Implicit absl.testing.parameterized dependency.
+        # Implicit jax dependency.
+        "//lingvo/core:cluster_factory",
+        "//lingvo/core:conformer_layer",
+        "//lingvo/jax:base_layer",
+        "//lingvo/jax:py_utils",
+        "//lingvo/jax:test_utils",
+        "//lingvo/jax/layers:conformers",
+        # Implicit numpy dependency.
+        # Implicit tensorflow dependency.
+    ],
+)
+
+pytype_strict_library(
+    name = "conformers",
+    srcs = ["conformers.py"],
+    srcs_version = "PY3",
+    deps = [
+        ":attentions",
+        ":convolutions",
+        ":normalizations",
+        ":stochastics",
+        ":transformers",
+        "//lingvo/jax:asserts",
+        "//lingvo/jax:base_layer",
+        "//lingvo/jax:py_utils",
     ],
 )
 
@@ -271,6 +309,7 @@ pytype_strict_library(
         ":stochastics",
         # Implicit absl.logging dependency.
         # Implicit jax dependency.
+        "//lingvo/jax:asserts",
         "//lingvo/jax:base_layer",
         "//lingvo/jax:gshard_utils",
         "//lingvo/jax:py_utils",
@@ -443,12 +482,17 @@ py_strict_test(
 
 py_strict_test(
     name = "transformers_test",
+    size = "large",
     srcs = ["transformers_test.py"],
     python_version = "PY3",
-    shard_count = 16,
+    # TODO(BF-JAX): Consider splitting this module into
+    # transformers and transformers_models since this is growing
+    # too big.
+    shard_count = 26,
     srcs_version = "PY3",
     deps = [
         ":attentions",
+        ":embedding_softmax",
         ":ngrammer",
         ":transformers",
         # Implicit absl.logging dependency.
@@ -456,6 +500,7 @@ py_strict_test(
         # Implicit absl.testing.parameterized dependency.
         # Implicit jax dependency.
         "//lingvo/core:batch_major_attention",
+        "//lingvo/core:layers_with_attention",
         "//lingvo/jax:base_layer",
         "//lingvo/jax:py_utils",
         "//lingvo/jax:test_utils",

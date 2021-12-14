@@ -106,9 +106,9 @@ pytype_strict_library(
     srcs = ["eval.py"],
     srcs_version = "PY3",
     deps = [
+        ":base_layer",
         ":base_model_params",
         ":model_utils",
-        ":partitioning",
         ":py_utils",
         ":pytypes",
         ":summary_utils",
@@ -116,7 +116,9 @@ pytype_strict_library(
         ":trainer_lib",
         # Implicit absl.logging dependency.
         # Implicit jax dependency.
+        "//third_party/py/jax:mesh_utils",
         "//lingvo/jax:checkpoints",
+        "//lingvo/jax:io_utils",
         "//lingvo/jax:model_imports",
         # Implicit tensorflow dependency.
     ],
@@ -164,6 +166,7 @@ pytype_strict_library(
     srcs = ["model.py"],
     srcs_version = "PY3",
     deps = [
+        ":base_input",
         ":base_layer",
         ":learners",
         ":metric_utils",
@@ -240,30 +243,6 @@ pytype_strict_library(
 )
 
 pytype_strict_library(
-    name = "partitioning",
-    srcs = ["partitioning.py"],
-    srcs_version = "PY3",
-    deps = [
-        # Implicit absl.logging dependency.
-        # Implicit jax dependency.
-        # Implicit numpy dependency.
-    ],
-)
-
-py_strict_test(
-    name = "partitioning_test",
-    srcs = ["partitioning_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
-    deps = [
-        ":partitioning",
-        # Implicit absl.testing.absltest dependency.
-        # Implicit absl.testing.parameterized dependency.
-        # Implicit jax dependency.
-    ],
-)
-
-pytype_strict_library(
     name = "py_utils",
     srcs = ["py_utils.py"],
     srcs_version = "PY3",
@@ -336,12 +315,12 @@ pytype_strict_library(
     deps = [
         ":base_input",
         ":model_utils",
-        ":partitioning",
         ":py_utils",
         ":summary_utils",
         ":trainer_lib",
         # Implicit absl.logging dependency.
         # Implicit jax dependency.
+        "//third_party/py/jax:mesh_utils",
         "//lingvo/jax:checkpoints",
         "//lingvo/jax:model_imports",
         # Implicit tensorflow dependency.
@@ -456,4 +435,11 @@ py_strict_test(
         "//lingvo/core:py_utils",
         "//lingvo/core:schedule",
     ],
+)
+
+pytype_strict_library(
+    name = "io_utils",
+    srcs = ["io_utils.py"],
+    srcs_version = "PY3",
+    deps = [],
 )

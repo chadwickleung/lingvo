@@ -61,7 +61,7 @@ def StartShell(local_ns=None):
   IPython.start_ipython(argv=[], user_ns=user_ns)
 
 
-class Controller(base_runner.GraphRunner):
+class Controller(base_runner.BaseRunner):
   """Controller for a training cluster."""
 
   def __init__(self, *args, **kwargs):
@@ -109,11 +109,8 @@ class Controller(base_runner.GraphRunner):
         self._control_dir, 'params.pbtxt')
     self._summary_writer.add_graph(self._graph)
 
-  def _CreateCheckpointer(self, train_dir, model, init_op=None):
-    """Wrapper method for override purposes."""
-    return checkpointer.Checkpointer(train_dir, model, init_op)
-
   def Start(self):
+    super().Start()
     self._RunLoop('controller', self._Loop)
 
   def StartEnqueueOp(self, op):
@@ -189,7 +186,7 @@ class Controller(base_runner.GraphRunner):
         metrics.CreateScalarSummary(tag, value), step)
 
 
-class Trainer(base_runner.GraphRunner):
+class Trainer(base_runner.BaseRunner):
   """Trainer on non-TPU."""
 
   def __init__(self, *args, **kwargs):
@@ -242,6 +239,7 @@ class Trainer(base_runner.GraphRunner):
           metrics.CreateScalarSummary(tag, value), steps)
 
   def Start(self):
+    super().Start()
     self._RunLoop('trainer', self._Loop)
 
   def StartEnqueueOp(self, op):
@@ -346,7 +344,7 @@ class Trainer(base_runner.GraphRunner):
                                         per_example_tensors)
 
 
-class TrainerTpu(base_runner.GraphRunner):
+class TrainerTpu(base_runner.BaseRunner):
   """Trainer on TPU."""
 
   def __init__(self, *args, **kwargs):
@@ -623,6 +621,7 @@ class TrainerTpu(base_runner.GraphRunner):
     self._initialized.clear()
 
   def Start(self):
+    super().Start()
     # Run training.
     self._RunLoop('trainer', self._Loop, cleanup_func=self._CleanUp)
 
@@ -734,8 +733,12 @@ class TrainerTpu(base_runner.GraphRunner):
           # max step horizon, the trainer thread would continue run for 3 loops
           # (3K global steps usually), so the enqueue thread could get a chance
           # to move forward and run `_ShouldStop()` to stop gracefully.
+          # Updated this to account for `tpu_infeed_parallelism` which could
+          # allow for more enqueue threads to get further ahead of the traiiner
+          # thread.
           if self._max_steps_for_early_stop is None:
-            self._max_steps_for_early_stop = global_step + 3 * self._steps_per_loop
+            tpu_infeed_parallelism = self._task.input.params.tpu_infeed_parallelism
+            self._max_steps_for_early_stop = global_step + 3 * tpu_infeed_parallelism * self._steps_per_loop
             tf.logging.info('Early stopping at step: %d',
                             self._max_steps_for_early_stop)
 
@@ -818,7 +821,7 @@ class TrainerTpu(base_runner.GraphRunner):
             **{k: v[0] for k, v in eval_metrics.items()})
 
 
-class Evaler(base_runner.GraphRunner):
+class Evaler(base_runner.BaseRunner):
   """Evaler."""
 
   def __init__(self, eval_type, *args, **kwargs):
@@ -872,11 +875,8 @@ class Evaler(base_runner.GraphRunner):
       tf.io.write_graph(self._graph.as_graph_def(), self._eval_dir,
                         '%s.pbtxt' % self._output_name)
 
-  def _CreateCheckpointer(self, train_dir, model):
-    """Wrapper method for override purposes."""
-    return checkpointer.Checkpointer(train_dir, model)
-
   def Start(self):
+    super().Start()
     self._RunLoop(self._job_name, self._Loop)
 
   def _Loop(self):
@@ -1065,7 +1065,7 @@ def _GetCheckpointIdForDecodeOut(ckpt_id_from_file, global_step):
   return ckpt_id_from_file
 
 
-class Decoder(base_runner.GraphRunner):
+class Decoder(base_runner.BaseRunner):
   """Decoder."""
 
   def __init__(self, decoder_type, *args, **kwargs):
@@ -1128,11 +1128,8 @@ class Decoder(base_runner.GraphRunner):
       tf.io.write_graph(self._graph.as_graph_def(), self._decoder_dir,
                         '%s.pbtxt' % self._job_name)
 
-  def _CreateCheckpointer(self, train_dir, model):
-    """Wrapper method for override purposes."""
-    return checkpointer.Checkpointer(train_dir, model)
-
   def Start(self):
+    super().Start()
     self._RunLoop(self._job_name, self._Loop)
 
   def _Loop(self):

@@ -20,7 +20,24 @@ pytype_strict_library(
         "//lingvo/core/ops",
         "//lingvo/jax:base_input",
         "//lingvo/jax:py_utils",
+        "//lingvo/jax:pytypes",
         # Implicit tensorflow dependency.
+    ],
+)
+
+pytype_strict_library(
+    name = "model_params",
+    srcs = ["model_params.py"],
+    deps = [
+        # Implicit jax dependency.
+        "//lingvo/jax:asserts",
+        "//lingvo/jax:base_model_params",
+        "//lingvo/jax:model",
+        "//lingvo/jax:optimizers",
+        "//lingvo/jax:py_utils",
+        "//lingvo/jax:schedules",
+        "//lingvo/jax/layers",
+        # Implicit numpy dependency.
     ],
 )
 
@@ -33,9 +50,7 @@ filegroup(
 py_strict_test(
     name = "input_generator_test",
     srcs = ["input_generator_test.py"],
-    data = [
-        ":testdata",
-    ],
+    data = [":testdata"],
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [

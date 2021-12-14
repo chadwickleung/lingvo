@@ -27,6 +27,8 @@ from lingvo.jax.layers.attentions import segment_mask
 
 from lingvo.jax.layers.augmentations import MaskedLmDataAugmenter
 
+from lingvo.jax.layers.conformers import Conformer
+
 from lingvo.jax.layers.convolutions import Conv2D
 from lingvo.jax.layers.convolutions import ConvBNAct
 from lingvo.jax.layers.convolutions import DepthwiseConv1D
@@ -76,6 +78,7 @@ from lingvo.jax.layers.transformers import compute_attention_masks_for_fprop
 from lingvo.jax.layers.transformers import StackedTransformer
 from lingvo.jax.layers.transformers import StackedTransformerRepeated
 from lingvo.jax.layers.transformers import Transformer
+from lingvo.jax.layers.transformers import TransformerEncoderDecoder
 from lingvo.jax.layers.transformers import TransformerFeedForward
 from lingvo.jax.layers.transformers import TransformerFeedForwardMoe
 from lingvo.jax.layers.transformers import TransformerLm

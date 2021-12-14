@@ -79,6 +79,11 @@ class BaseProgram:
              'Whether to write input data stats during training.')
     p.Define('max_metrics', 256, 'Overrides TpuEvalMetrics.max_metrics')
     p.Define('ml_perf', None, 'MLPerf config')
+    p.Define(
+        'checkpoint_to_load', None,
+        'If set, the program will initially load from this checkpoint, '
+        'ignoring train_dir. Typically used for oneoff decode.'
+        'Eager mode is currently not supported!')
     return p
 
   def __init__(self,
@@ -97,6 +102,9 @@ class BaseProgram:
     self._tf_master = kwargs.pop('tf_master', None)
     self._write_train_input_stats = p.write_train_input_stats
     self._trial = trial
+    if p.checkpoint_to_load and py_utils.IsEagerMode():
+      raise NotImplementedError(
+          'p.checkpoint_to_load is not supported for eager mode!')
 
     # Program dirs are where the summaries are written to.
     if p.task_name:
@@ -347,6 +355,8 @@ class BaseProgram:
   def RestoreIfNeeded(self, sess=None):
     if py_utils.IsEagerMode():
       raise TypeError('Not supported in Eager mode.')
+    elif self.params.checkpoint_to_load:
+      self._checkpointer.RestoreFromPath(sess, self.params.checkpoint_to_load)
     else:
       self._checkpointer.RestoreIfNeeded(sess)
 
@@ -395,9 +405,8 @@ class InputBenchmark(BaseProgram):
     p.Define('measurement_loops', 5, 'How many loops to measure across.')
     return p
 
-  def __init__(self, params, shared_model=None, **kwargs):
-    super().__init__(
-        params, shared_model=shared_model, input_benchmark_only=True, **kwargs)
+  def __init__(self, params, **kwargs):
+    super().__init__(params, input_benchmark_only=True, **kwargs)
     self._program_name = 'InputBenchmark'
 
   def BuildTpuSubgraph(self):
@@ -427,11 +436,13 @@ class InputBenchmark(BaseProgram):
 class TrainProgram(BaseProgram):
   """TrainProgram trains a single task and handles checkpoints."""
 
-  def __init__(self, params, shared_model=None, **kwargs):
-    super().__init__(params, shared_model=shared_model, **kwargs)
+  def __init__(self, params, **kwargs):
+    super().__init__(params, **kwargs)
     self._step_rate_tracker = summary_utils.StepRateTracker()
     self._program_name = 'TrainProgram'
     p = self.params
+    assert not p.checkpoint_to_load, (
+        'TrainProgram does not support checkpoint_to_load!')
     if (p.ml_perf is not None and p.ml_perf.benchmark_name is not None and
         p.ml_perf.steps_per_epoch is not None):
       self._ml_perf = p.ml_perf
@@ -528,7 +539,7 @@ class TrainProgram(BaseProgram):
       with py_utils.OpportunisticVariableReuseScope(True):
         with contextlib.ExitStack() as stack:
           if py_utils.IsEagerMode():
-            stack.enter_context(py_utils.GradientTape())
+            stack.enter_context(py_utils.GradientTape(persistent=True))
           self._model.ConstructFPropBPropGraph()
       per_step_eval_metrics = self._eval_metrics.SetMetrics(
           self._task.eval_metrics, args)
@@ -713,8 +724,8 @@ class TrainProgram(BaseProgram):
 class EvalProgram(BaseProgram):
   """Evaluation program."""
 
-  def __init__(self, params, shared_model=None, **kwargs):
-    super().__init__(params, shared_model=shared_model, **kwargs)
+  def __init__(self, params, **kwargs):
+    super().__init__(params, **kwargs)
     self._program_name = 'EvalProgram'
     p = self.params
     if (p.ml_perf is not None and p.ml_perf.benchmark_name is not None and
@@ -935,8 +946,8 @@ class DecodeProgram(BaseProgram):
              'The list of email addresses to send result summaries to.')
     return p
 
-  def __init__(self, params, shared_model=None, **kwargs):
-    super().__init__(params, shared_model=shared_model, **kwargs)
+  def __init__(self, params, **kwargs):
+    super().__init__(params, **kwargs)
     self._program_name = 'DecodeProgram'
     self._decode_out_dict_lst = []
 
@@ -1358,8 +1369,8 @@ class MLPerfTrainDecodeProgram(BaseProgram):
     p.Define('decode_steps_per_loop', 0, '')
     return p
 
-  def __init__(self, params, shared_model=None, **kwargs):
-    super().__init__(params, shared_model=shared_model, **kwargs)
+  def __init__(self, params, **kwargs):
+    super().__init__(params, **kwargs)
     if py_utils.IsEagerMode():
       raise NotImplementedError(
           'MLPerfTrainDecodeProgram is not supported in eager mode.')
@@ -1560,8 +1571,7 @@ class MultiTaskProgramSchedule:
   @classmethod
   def Params(cls):
     p = hyperparams.InstantiableParams(cls)
-    p.Define('program_schedule_dict', None,
-             'task_name -> ProgramScheduleParams')
+    p.Define('program_schedule_dict', {}, 'task_name -> ProgramScheduleParams')
     return p
 
 
@@ -1603,17 +1613,9 @@ class SimpleProgramSchedule:
                'Maximum number of steps to reach target accuracy')
     return p
 
-  def __init__(self,
-               params,
-               shared_model=None,
-               trial=base_trial.NoOpTrial(),
-               **kwargs):
-    # params is program_schedule_params as supplied in executor.py
-    tf.logging.info('Instantiating Program Schedule')
+  def __init__(self, params, **kwargs):
     self.params = params.Copy()
     p = self.params
-    # shared_model == None
-    self._shared_model = shared_model
     self._programs = []
     self.train_program = None
 
@@ -1636,11 +1638,7 @@ class SimpleProgramSchedule:
       # Confirmed: task_name == ''
       p.train_program.task_name = p.task_name
       p.train_program.ml_perf = p.ml_perf.Copy()
-
-      # p.train_program is instantiated in SimpleProgramScheduleForTask()
-      # p.train_program is a class of TrainProgram
-      self.train_program = p.train_program.Instantiate(
-          shared_model=shared_model, trial=trial, **kwargs)
+      self.train_program = p.train_program.Instantiate(**kwargs)
       self._programs.append(self.train_program)
     elif py_utils.ExponentialMovingAverage():
       # When EMA is used, the train program must be added to self._programs
@@ -1661,9 +1659,7 @@ class SimpleProgramSchedule:
 
     self.eval_programs = []
     for eval_program in p.eval_programs:
-      self.eval_programs.append(
-          eval_program.Instantiate(
-              shared_model=shared_model, trial=trial, **kwargs))
+      self.eval_programs.append(eval_program.Instantiate(**kwargs))
     self._programs += self.eval_programs
 
     if p.ml_perf is not None:
@@ -1898,7 +1894,8 @@ def UpdateProgramSchedule(ps_params,
                           train_steps_per_loop,
                           eval_steps_per_loop,
                           decode_steps_per_loop,
-                          decode_summary_emails=None):
+                          decode_summary_emails=None,
+                          oneoff_checkpoint_to_load=None):
   """Update ProgramSchedule params with the given new configs.
 
   Currently this override only support EvalProgram and DecodeProgram.
@@ -1909,19 +1906,25 @@ def UpdateProgramSchedule(ps_params,
       datasets in ps_params.
     train_executions_per_eval: Optional[int], if not None, it will override
       train_executions_per_eval in ps_params.
-    train_steps_per_loop: Optional[int], if not None, it will override
-      train program's steps_per_loop.
+    train_steps_per_loop: Optional[int], if not None, it will override train
+      program's steps_per_loop.
     eval_steps_per_loop: Optional[int], if not None, it will override all the
       eval programs steps_per_loop. Currently list not supported.
     decode_steps_per_loop: Optional[int], if not None, it will override all the
       decode programs steps_per_loop. If set to -1, it will set
       decode_until_out_of_range=True. Currently list not supported.
     decode_summary_emails: List of emails to send Decode summary to.
+    oneoff_checkpoint_to_load: Optional[str], if not None, it will override
+      eval/decode program checkpoint_to_load.
 
   Returns:
     ps_params after overriden.
   """
   assert ps_params
+  if issubclass(ps_params.cls, MultiTaskProgramSchedule):
+    tf.logging.info(
+        'UpdateProgramSchedule does not support MultiTaskProgramSchedule.')
+    return ps_params
   if dataset_list is not None:
     ps_params.dataset_names = dataset_list
     # Dict for all the override datasets:
@@ -1982,6 +1985,16 @@ def UpdateProgramSchedule(ps_params,
         if issubclass(eval_program.cls, DecodeProgram):
           _SetDecodeStepsPerLoop(eval_program, decode_steps_per_loop)
 
+  if oneoff_checkpoint_to_load:
+    if ps_params.train_executions_per_eval:
+      tf.logging.warning(
+          'Training with decoding does not suggest to set `checkpoint_to_load` '
+          'for DecodeProgram!')
+    for eval_program in ps_params.eval_programs:
+      if issubclass(eval_program.cls, DecodeProgram) or issubclass(
+          eval_program.cls, EvalProgram):
+        eval_program.checkpoint_to_load = oneoff_checkpoint_to_load
+
   if decode_summary_emails:
     for eval_program in ps_params.eval_programs:
       if issubclass(eval_program.cls, DecodeProgram):
@@ -2025,10 +2038,9 @@ class MLPerfProgramSchedule:
 
     return p
 
-  def __init__(self, params, shared_model=None, **kwargs):
+  def __init__(self, params, **kwargs):
     self.params = params.Copy()
     p = self.params
-    self._shared_model = shared_model
 
     # Propagate run-time parameters to programs:
     p.train_program.logdir = p.logdir
@@ -2048,8 +2060,7 @@ class MLPerfProgramSchedule:
     p.train_program.task_name = p.task_name
     p.train_program.ml_perf = p.ml_perf.Copy()
 
-    self.train_program = p.train_program.Instantiate(
-        shared_model=shared_model, **kwargs)
+    self.train_program = p.train_program.Instantiate(**kwargs)
     self._programs = []
     self._programs.append(self.train_program)
 

@@ -22,7 +22,7 @@ import traceback
 
 from lingvo import base_trial
 from lingvo import pdb_wrapper
-from lingvo import trainer_utils
+from lingvo import trainer_utils  # pylint: disable=unused-import
 import lingvo.compat as tf
 from lingvo.core import checkpointer
 from lingvo.core import cluster_factory
@@ -39,11 +39,63 @@ FLAGS = tf.flags.FLAGS
 class BaseRunner:
   """Base class for all jobs."""
 
-  def __init__(self):
-    self._params = None
-    self._trial = None
-    self._early_stop = None
+  def __init__(self,
+               params,
+               model_task_name='',
+               logdir='',
+               tf_master='',
+               trial=base_trial.NoOpTrial()):
+    """A job runner.
+
+    Args:
+      params:  Params object containing model configuration.
+      model_task_name:  String name of the task this runner should execute for
+        multitask models only.  See flag for details.
+      logdir:  String path to the log directory to output to.
+      tf_master:  String path to the master job, e.g. 'local'.
+      trial:   An optional hyperparameter trial. Used by Vizier studies.
+    """
+    self._params = trial.OverrideModelParams(params.Copy())
+    p = self.params
+
+    self._model_task_name = model_task_name
+    self._logdir = logdir
+    self._train_dir = os.path.join(self._logdir, 'train')
+    tf.io.gfile.makedirs(self._train_dir)
+
+    self._tf_master = tf_master
+    self._trial = trial
+
+    # If the runner is conducting a Vizier trial, scope all the variables
+    # (e.g., global_step) by the trial id so that we do not share states across
+    # trials.
+    self._container_id = self._trial.Name()
+
+    # Set in subclasses.
+    self._job_name = ''
+    self._daemon = False
+    self._verbose_enqueue_logging = False
+
     self._checkpointer = None
+    self._should_report_metrics = False
+
+    if py_utils.IsEagerMode():
+      self._graph = None
+    else:
+      self._graph = tf.Graph()
+    self._summary_writer = None
+    self._initialize_tables = None
+    self._dequeue_thread_complete = False
+
+    self._early_stop = None
+    # The actual EarlyStop object.
+    if p.train.early_stop and p.train.early_stop.window:
+      early_stop.MetricHistory.SetLogdirInMetricHistories(p, self._logdir)
+      self._early_stop = p.train.early_stop.Instantiate()
+      self._verbose_enqueue_logging = True
+
+    # Merged TF scalar summaries for training related input data stats.
+    self._merged_input_data_summary_op = None
 
     # To early terminate a runner, we set max_steps here and that will trigger
     # appropriate ShouldStop behavior in the threads. This is used by Vizier
@@ -51,9 +103,40 @@ class BaseRunner:
     # metrics.
     self._max_steps_for_early_stop = None
 
+    self.enqueue_ops = None
+
+    tf.logging.info('=' * 60)
+    for line in self.params.ToText().split('\n'):
+      tf.logging.info('%s', line)
+    tf.logging.info('=' * 60)
+
+    self._SetStatusMessage('Starting ...')
+    self.params.cluster.logdir = logdir
+    self._cluster = cluster_factory.Cluster(self.params.cluster)
+    self._worker_cluster_def = self._cluster.worker_cluster_def
+
+    if py_utils.IsEagerMode():
+      self._cluster.InitDevicesEager()
+    else:
+      self._cluster.InitDevices(self._GetSession())
+
+    # Ensure global step tensor is created.
+    py_utils.GetOrCreateGlobalStepVar()
+
   @property
   def params(self):
     return self._params
+
+  def Start(self):
+    pass
+
+  def _CreateCheckpointer(self, train_dir, model, init_op=None):
+    """Wrapper method for override purposes."""
+    if py_utils.IsEagerMode():
+      if FLAGS.write_v2_checkpoints:
+        return checkpointer.EagerCheckpointerV2(train_dir, model, init_op)
+      return checkpointer.EagerCheckpointerV1(train_dir, model, init_op)
+    return checkpointer.Checkpointer(train_dir, model, init_op)
 
   @classmethod
   def _GetTtlDir(cls, path, duration):
@@ -225,84 +308,6 @@ class BaseRunner:
         # Check for new checkpoints every 10 seconds if none are found. Spends
         # 1s worth of CPU cycles every ~3hrs looking for new checkpoints.
         time.sleep(10)
-
-
-class GraphRunner(BaseRunner):
-  """Base class for graph jobs."""
-
-  def __init__(self,
-               params,
-               model_task_name,
-               logdir,
-               tf_master,
-               trial=base_trial.NoOpTrial()):
-    """Construct a new GraphRunner.
-
-    Args:
-      params:  Params object containing model configuration.
-      model_task_name:  String name of the task this runner should execute for
-        multitask models only.  See flag for details.
-      logdir:  String path to the log directory to output to.
-      tf_master:  String path to the master job, e.g. 'local'.
-      trial:   An optional hyperparameter trial. Used by Vizier studies.
-    """
-    super().__init__()
-    p = params.Copy()
-    # Set in subclasses.
-    self._job_name = ''
-    self._daemon = False
-    self._verbose_enqueue_logging = False
-
-    # this just return the same thing, same p
-    self._params = trial.OverrideModelParams(p)
-
-    # This is the long list of model configs
-    tf.logging.info('=' * 60)
-    # self.params is a class property, which returns self._params
-    for line in self.params.ToText().split('\n'):
-      tf.logging.info('%s', line)
-    tf.logging.info('=' * 60)
-
-    self._logdir = logdir
-    self._tf_master = tf_master
-    self._model_task_name = model_task_name
-    self._trial = trial
-    # If the runner is conducting a Vizier trial, scope all the variables
-    # (e.g., global_step) by the trial id so that we do not share states across
-    # trials.
-    self._container_id = self._trial.Name()
-    self._should_report_metrics = False
-
-    self._train_dir = os.path.join(self._logdir, 'train')
-    tf.io.gfile.makedirs(self._train_dir)
-
-    # IsEager == False
-    if py_utils.IsEagerMode():
-      self._graph = None
-    else:
-      tf.logging.info('_graph : tf.Graph()')
-      self._graph = tf.Graph()
-    self._summary_writer = None
-    self._initialize_tables = None
-    self._dequeue_thread_complete = False
-    self.params.cluster.logdir = logdir
-
-    early_stop.MetricHistory.SetLogdirInMetricHistories(p, logdir)
-    # The actual EarlyStop object.
-    if p.train.early_stop and p.train.early_stop.window:
-      self._early_stop = p.train.early_stop.Instantiate()
-      self._verbose_enqueue_logging = True
-
-    self._SetStatusMessage('Starting ...')
-    self._cluster = cluster_factory.Cluster(self.params.cluster)
-    self._worker_cluster_def = self._cluster.worker_cluster_def
-    if py_utils.IsEagerMode():
-      self._cluster.InitDevicesEager()
-    else:
-      self._cluster.InitDevices(self._GetSession())
-
-    # Merged TF scalar summaries for training related input data stats.
-    self._merged_input_data_summary_op = None
 
   def _InVizierStudy(self):
     return not isinstance(self._trial, base_trial.NoOpTrial)
@@ -668,34 +673,3 @@ class GraphRunner(BaseRunner):
     if global_enqueue_steps % self._input_stats_summary_interval_steps == 0:
       self._summary_writer.add_summary(summary_str, global_enqueue_steps)
       self._summary_writer.flush()
-
-
-class EagerRunner(BaseRunner):
-  """Base class for eager runners."""
-
-  def __init__(self, params):
-    super().__init__()
-    self._params = params
-    self._cluster = cluster_factory.Cluster(
-        trainer_utils.UpdateClusterParamsFromFlags(params.cluster))
-    tf.logging.info('Cluster params: %s', self._cluster.params.ToText())
-    self._train_dir = os.path.join(self._cluster.logdir, 'train')
-    self._model = None
-    self._task = None
-
-  def Start(self):
-    """Start."""
-    assert tf.executing_eagerly()
-    assert py_utils.IsEagerMode()
-
-    # Set up cluster and model params.
-    self._cluster.InitDevicesEager()
-    with self._cluster:
-      self._model = self._params.Instantiate()
-      self._task = self._model.GetTask(FLAGS.model_task_name)
-      if FLAGS.write_v2_checkpoints:
-        self._checkpointer = checkpointer.EagerCheckpointerV2(
-            self._train_dir, self._model)
-      else:
-        self._checkpointer = checkpointer.EagerCheckpointerV1(
-            self._train_dir, self._model)
