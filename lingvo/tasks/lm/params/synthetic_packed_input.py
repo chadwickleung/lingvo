@@ -128,8 +128,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
         label_smoothing=self.LABEL_SMOOTHING,
         vocab_size=self.VOCAB_SIZE,
         max_length=self.SEQUENCE_LENGTH,
-        moe = self.MOE,
-        moe_gated_gelu = self.MOE)
+        moe = self.MOE)
 
     p.train.optimizer = optimizer.XLAShardingAdafactor.Params().Set(
         beta1=0.0,
