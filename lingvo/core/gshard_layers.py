@@ -2283,7 +2283,7 @@ def Top2Gating(w,
   """
   # tf.logging.info('################################################################')
   # tf.logging.info('################Test logging statement################')
-  wandb.log('Test wandb logging')
+  wandb.log({'Test wandb logging': time.time()})
   orig_inputs = inputs
   if not local_dispatch:
     inputs = tf.reshape(inputs, [1, inputs.shape[0] * inputs.shape[1], -1])
