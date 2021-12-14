@@ -49,6 +49,9 @@ from lingvo.core import summary_utils
 
 from google.protobuf import text_format
 
+# WandB
+import wandb
+
 
 tf.flags.DEFINE_bool(
     'interactive', False,
@@ -836,6 +839,8 @@ class RunnerManager:
     self.MaybeConfigCloudTpu()
     self.MaybeLaunchTensorFlow()
 
+    wandb.init(project="gshard-decode", entity="chadwickleung", config=FLAGS)
+
     if FLAGS.job.startswith('evaler_once_'):
       # E.g., trainer --model=foo.bar.Model --logdir=...
       # --run_locally=cpu --mode=sync --job=evaler_once_test@65200
@@ -853,7 +858,7 @@ if __name__ == '__main__':
   tf.flags.mark_flag_as_required('model')
   FLAGS(sys.argv, known_only=True)
   if FLAGS.disable_tf2:
-    tf.disable_v2_behavior()
+    tf.disable_v2_behavior() 
   py_utils.SetEagerMode(FLAGS.use_eager)
   tf.config.run_functions_eagerly(FLAGS.run_functions_eagerly)
   model_imports.ImportParams(FLAGS.model)

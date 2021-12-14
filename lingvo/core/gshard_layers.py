@@ -30,6 +30,9 @@ from tensorflow.compiler.tf2xla.python import xla
 from tensorflow.compiler.xla.experimental.xla_sharding import xla_sharding
 # pylint: enable=g-direct-tensorflow-import
 
+import wandb
+import time
+
 
 Split = gshard_utils.Split
 MeshSplit = gshard_utils.MeshSplit
@@ -78,7 +81,7 @@ class VarLayer(base_layer.BaseLayer):
       self.InstantiateVariables()
 
   def FProp(self, theta, *args, **kwargs):
-    tf.logging.info('Have some TODO')
+    # tf.logging.info('Have some TODO')
     def MaybeCastToFPropDtype(x):
       if x is None or not x.dtype.is_floating or x.dtype == self._params.fprop_dtype:
         return x
@@ -2278,8 +2281,9 @@ def Top2Gating(w,
       combining expert outputs.
     - aux_loss: auxiliary loss, equalizing the expert assignment ratios.
   """
-  tf.logging.info('################################################################')
-  tf.logging.info('################Test logging statement################')
+  # tf.logging.info('################################################################')
+  # tf.logging.info('################Test logging statement################')
+  wandb.log('Test wandb logging')
   orig_inputs = inputs
   if not local_dispatch:
     inputs = tf.reshape(inputs, [1, inputs.shape[0] * inputs.shape[1], -1])
