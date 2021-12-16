@@ -3250,7 +3250,7 @@ class UniTransformer(base_model.BaseTask):
         atten_layer = b.DecMultiDconvHeadAttentionRelativeBias(
             'multi_dconv_head_att')
       else:
-        # Confirmed: Uses DecSelfAttentionRelativeBias
+        # Chadwick: Confirmed: Uses DecSelfAttentionRelativeBias
         tf.logging.info('################dec self attention################')
         atten_layer = b.DecSelfAttentionRelativeBias('dec_self_attention')
       if gated_ffn_activation is None:

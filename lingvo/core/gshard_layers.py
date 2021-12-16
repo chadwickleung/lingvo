@@ -2281,9 +2281,8 @@ def Top2Gating(w,
       combining expert outputs.
     - aux_loss: auxiliary loss, equalizing the expert assignment ratios.
   """
-  # tf.logging.info('################################################################')
-  # tf.logging.info('################Test logging statement################')
-  wandb.log({'Test wandb logging': time.time()})
+  t_start = time.time()
+ 
   orig_inputs = inputs
   if not local_dispatch:
     inputs = tf.reshape(inputs, [1, inputs.shape[0] * inputs.shape[1], -1])
@@ -2316,6 +2315,11 @@ def Top2Gating(w,
         dispatch_tensor, orig_inputs.shape[:2] + dispatch_tensor.shape[2:])
     combine_tensor = tf.reshape(
         combine_tensor, orig_inputs.shape[:2] + combine_tensor.shape[2:])
+
+  t_end = time.time()
+  wandb.log({'Compute Top-2 Gating Start Time': t_start,
+             'Time in Compute Top-2 Gating': t_end - t_start,
+             'Compute Top-2 Gating End Time': t_end})
 
   return py_utils.NestedMap(
       combine_tensor=combine_tensor,
@@ -2376,6 +2380,8 @@ def FeedForwardNetworksApplyGating(gating,
     outputs: G`SM Tensor.
     aux_loss: scalar auxiliary loss.
   """
+  t_start = time.time()
+  
   if device_mesh is not None:
     assert gsm_split is not None
     assert egcm_split is not None
@@ -2394,11 +2400,15 @@ def FeedForwardNetworksApplyGating(gating,
     return gshard_utils.Split(t, 0, num_devices)
 
   # dispatch_tensor: G`SEC
+  t_dispatch_start = time.time()
   expert_inputs = _Einsum(
       'GSEC,GSM->EGCM',
       _NewOrHistoricSplit(gating.dispatch_tensor, gsec_split),
       _NewOrHistoricSplit(reshaped_inputs, gsm_split),
       name='expert_inputs_egcm')
+  t_dispatch_end = time.time()
+
+  # Chadwick: What does this do?
   expert_inputs = _NewOrHistoricSplit(expert_inputs, egcm_split)
 
   # pylint: disable=invalid-name
@@ -2411,6 +2421,8 @@ def FeedForwardNetworksApplyGating(gating,
   # combine_tensor: G`SEC
   G = py_utils.GetShape(gating.combine_tensor)[0]
   # allow evaler/decoder to run.
+
+  # Chadwick: Ignored num_groups
   del num_groups
   C = py_utils.GetShape(gating.combine_tensor)[-1]
   A = G * C
@@ -2459,14 +2471,26 @@ def FeedForwardNetworksApplyGating(gating,
       expert_outputs,
       name='expert_outputs_gecm')
 
+  t_combine_start = time.time()
   combined_outputs = _Einsum(
       'GSEC,GECM->GSM',
       _NewOrHistoricSplit(gating.combine_tensor, gsec_split),
       _NewOrHistoricSplit(expert_outputs, gecm_split),
       name='combined_outputs_gsm')
+  t_combine_end = time.time()
+
   outputs = _NewOrHistoricSplit(
       tf.reshape(combined_outputs, py_utils.GetShape(inputs)), gsm_split)
   aux_loss = gating.aux_loss
+
+  t_end = time.time()
+  wandb.log({'FFN Start Time': t_start,
+             'Time in Dispatch': t_dispatch_end - t_dispatch_start,
+             'Dispatch End Time': t_dispatch_end,
+             'Combine Start Time': t_combine_start,
+             'Time in Combine': t_combine_end - t_combine_start,
+             'FFN End Time': t_end})
+
   return outputs, aux_loss
 
 
