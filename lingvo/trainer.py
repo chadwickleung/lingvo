@@ -839,7 +839,7 @@ class RunnerManager:
     self.MaybeConfigCloudTpu()
     self.MaybeLaunchTensorFlow()
 
-    wandb.init(project="gshard-decode", entity="chadwickleung", config=FLAGS)
+    wandb.init(project="gshard-decode", entity="gshard-decode", config=FLAGS)
 
     if FLAGS.job.startswith('evaler_once_'):
       # E.g., trainer --model=foo.bar.Model --logdir=...
