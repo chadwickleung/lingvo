@@ -37,7 +37,8 @@ class SaverWrapper:
                logdir,
                train_params,
                variables_to_restore_dict=None,
-               finite_check=True):
+               finite_check=True,
+               async_save=False):
     """Create a tf.train.Saver or a custom_saver.Saver.
 
     Args:
@@ -47,11 +48,14 @@ class SaverWrapper:
         Typically, used in evaluation for substituting exponential moving
         average weights.  If this is set, then tf.train.Saver is used.
       finite_check: Whether to santiy check variables to be finite.
+      async_save: Save asynchronously. Only works with custom saver.
     """
     self._logdir = logdir
     self._save_path = os.path.join(self._logdir, 'ckpt')
     self._use_custom_saver = (
         FLAGS.use_custom_saver and not variables_to_restore_dict)
+    if async_save and not self._use_custom_saver:
+      tf.logging.warning('Asynchronous saving only works with custom saver.')
 
     self._keep_latest_n = train_params.save_max_to_keep
     self._keep_every_n_hours = train_params.save_keep_checkpoint_every_n_hours
@@ -91,7 +95,8 @@ class SaverWrapper:
           variables=self._var_list,
           sanity_checks=sanity_checks,
           keep_latest_n=self._keep_latest_n,
-          keep_every_n_hours=self._keep_every_n_hours)
+          keep_every_n_hours=self._keep_every_n_hours,
+          async_save=async_save)
 
   def Save(self, sess, gsteps):
     """Save a checkpoint.
@@ -231,7 +236,8 @@ class Checkpointer:
     return SaverWrapper(
         self._train_dir,
         self._train_params,
-        variables_to_restore_dict=variables_to_restore)
+        variables_to_restore_dict=variables_to_restore,
+        async_save=self.async_checkpointing)
 
   @property
   def async_checkpointing(self):
@@ -461,6 +467,7 @@ class EagerCheckpointerV1(_EagerCheckpointer):
     # Set to None; delay the initialization after the model ran at least once
     self._saver = None
     self._save_path = os.path.join(self._train_dir, 'ckpt')
+    self._restorer = None
 
   def _GetSaver(self):
     all_vars = _GetSaveableVariablesDict(self._models)
@@ -470,6 +477,13 @@ class EagerCheckpointerV1(_EagerCheckpointer):
         keep_checkpoint_every_n_hours=(
             self._train_params.save_keep_checkpoint_every_n_hours))
     return saver
+
+  def _GetRestorer(self):
+    """Use Checkpoint to restore checkpoint files created by Saver."""
+    all_vars = _GetSaveableVariablesDict(self._models)
+    # Restore name-based tf.compat.v1.train.Saver checkpoints with Checkpoint.
+    restorer = tf.train.Checkpoint(variables=all_vars)
+    return restorer
 
   def Restore(self, sess=None, force_reinitialize=None):
     """`sess` and `force_reinitialize` are unused in Eager context."""
@@ -507,13 +521,13 @@ class EagerCheckpointerV1(_EagerCheckpointer):
 
     # Calling this before `Save` because the optimizer and EMA variables are not
     # created until at least one training step in the Eager trainer.
-    if not self._saver:
-      self._saver = self._GetSaver()
+    if not self._restorer:
+      self._restorer = self._GetRestorer()
 
     assert not self._save_only
     tf.logging.info('Load from checkpoint (V1) %s.', checkpoint_path)
-    load_status = self._saver.restore(sess=None, save_path=checkpoint_path)
-    # Check all model vars are matched from the checkpoint
+    load_status = self._restorer.restore(save_path=checkpoint_path)
+    # Check all model vars are matched from the checkpoint.
     load_status.assert_existing_objects_matched()
     tf.logging.info('Load checkpoint done.')
 

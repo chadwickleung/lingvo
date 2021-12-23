@@ -313,12 +313,8 @@ class BaseConv2DLayer(quant_utils.QuantizableLayer):
           p.activation != 'NONE'):
         self.TrackQTensor('pre_activation')
 
-  def _CreateChildrenVariables(self):
-    # Backwards compatibility: manually call child.InstantiateVariables()
-    # outside of tf.variable_scope(p.name).
-    if self.params.batch_norm:
-      self.bn.InstantiateVariables()
-    super()._CreateChildrenVariables()
+  def _child_variable_scope_override(self):
+    return {**super()._child_variable_scope_override(), 'bn': []}
 
   @property
   def output_channels(self):
@@ -1103,12 +1099,8 @@ class ProjectionLayer(quant_utils.QuantizableLayer):
     if self._pre_activation_qt_name:
       self.TrackQTensor(self._pre_activation_qt_name)
 
-  def _CreateChildrenVariables(self):
-    # Backwards compatibility: manually call child.InstantiateVariables()
-    # outside of tf.variable_scope(p.name).
-    if self.params.batch_norm:
-      self.bn.InstantiateVariables()
-    super()._CreateChildrenVariables()
+  def _child_variable_scope_override(self):
+    return {**super()._child_variable_scope_override(), 'bn': []}
 
   def AddGlobalVN(self, theta):
     theta = super().AddGlobalVN(theta)
@@ -3825,11 +3817,8 @@ class SharedSoftmaxLayer(base_layer.BaseLayer):
           'Input_dim is not set for scaled embedding! Outputs will be 0s!')
     self.CreateChild('softmax', softmax_params)
 
-  def _CreateChildrenVariables(self):
-    # Backwards compatibility: 'softmax' should be created outside of
-    # tf.variable_scope(p.name).
-    self.softmax.InstantiateVariables()
-    super()._CreateChildrenVariables()
+  def _child_variable_scope_override(self):
+    return {**super()._child_variable_scope_override(), 'softmax': []}
 
   def Logits(self, theta, *args, **kwargs):
     return self.softmax.Logits(theta.softmax, *args, **kwargs)
@@ -4321,6 +4310,10 @@ class LayerNorm(base_layer.BaseLayer):
     p.Define('center', True,
              'Whether to subtract the mean when computing variance.')
     p.Define('use_defun', True, 'Whether to use CallDefun for normalization.')
+    p.Define(
+        'use_batch_norm_backend', False,
+        'Whether to use the implementation based on '
+        'tf.nn.batch_normalization.')
     return p
 
   def __init__(self, params):
@@ -4349,7 +4342,12 @@ class LayerNorm(base_layer.BaseLayer):
           collections=[self.__class__.__name__ + '_vars'] +
           [py_utils.SKIP_LP_REGULARIZATION])
     else:
-      scale_pc = pc
+      scale_pc = py_utils.WeightParams(
+          shape=[p.input_dim],
+          init=py_utils.WeightInit.Constant(0.0),
+          dtype=p.dtype,
+          collections=[self.__class__.__name__ + '_vars'] +
+          [py_utils.SKIP_LP_REGULARIZATION])
     self.CreateVariable('scale', scale_pc)
 
   def _GetScaleAndBias(self, theta):
@@ -4399,6 +4397,20 @@ class LayerNorm(base_layer.BaseLayer):
             (inputs - mean) * tf.math.rsqrt(variance + p.epsilon),
             dtype=scale.dtype)
         return inputs_norm * scale + cur_bias
+
+      if p.use_batch_norm_backend:
+        # Calculate the moments on the last axis (layer activations).
+        mean, variance = tf.nn.moments(inputs, -1, keepdims=True)
+
+        # Compute layer normalization using the batch_normalization function.
+        output = tf.nn.batch_normalization(
+            inputs,
+            mean,
+            variance,
+            offset=cur_bias,
+            scale=scale,
+            variance_epsilon=p.epsilon)
+        return output
 
       def Normalize(xs):
         """Normalize `xs.x` w/ `xs.scale` and `xs.bias` gain/shift."""

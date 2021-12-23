@@ -93,11 +93,16 @@ pytype_strict_library(
     srcs = ["checkpoints.py"],
     srcs_version = "PY3",
     deps = [
+        ":py_utils",
         ":train_states",
         # Implicit absl.logging dependency.
         # Implicit flax's core dependency.
         # Implicit flax's training dependency.
         # Implicit jax dependency.
+        # Implicit jax/experimental/gda_serialization:google_spec dependency.
+        # Implicit jax/experimental/gda_serialization:serialization dependency.
+        # Implicit numpy dependency.
+        # Implicit tensorflow dependency.
     ],
 )
 
@@ -116,7 +121,7 @@ pytype_strict_library(
         ":trainer_lib",
         # Implicit absl.logging dependency.
         # Implicit jax dependency.
-        "//third_party/py/jax:mesh_utils",
+        # Implicit jax:mesh_utils dependency.
         "//lingvo/jax:checkpoints",
         "//lingvo/jax:io_utils",
         "//lingvo/jax:model_imports",
@@ -142,8 +147,10 @@ pytype_strict_library(
     deps = [
         ":asserts",
         ":base_layer",
+        ":optimizer_prefix_vectorization",
         ":optimizers",
         ":py_utils",
+        ":pytypes",
         # Implicit jax dependency.
         # Implicit optax dependency.
         # Implicit tensorflow dependency.
@@ -233,10 +240,25 @@ pytype_strict_library(
     srcs = ["optimizers.py"],
     srcs_version = "PY3",
     deps = [
+        ":base_layer",
         ":gshard_utils",
         ":py_utils",
         ":pytypes",
+        # Implicit optax_shampoo dependency.
         # Implicit absl.logging dependency.
+        # Implicit jax dependency.
+        # Implicit optax dependency.
+    ],
+)
+
+pytype_strict_library(
+    name = "optimizer_prefix_vectorization",
+    srcs = ["optimizer_prefix_vectorization.py"],
+    srcs_version = "PY3",
+    deps = [
+        ":optimizers",
+        ":py_utils",
+        ":pytypes",
         # Implicit jax dependency.
         # Implicit optax dependency.
     ],
@@ -285,6 +307,7 @@ pytype_strict_library(
     srcs_version = "PY3",
     deps = [
         ":base_layer",
+        ":py_utils",
         ":pytypes",
         ":train_states",
         # Implicit absl.logging dependency.
@@ -320,7 +343,7 @@ pytype_strict_library(
         ":trainer_lib",
         # Implicit absl.logging dependency.
         # Implicit jax dependency.
-        "//third_party/py/jax:mesh_utils",
+        # Implicit jax:mesh_utils dependency.
         "//lingvo/jax:checkpoints",
         "//lingvo/jax:model_imports",
         # Implicit tensorflow dependency.
@@ -372,6 +395,7 @@ py_strict_test(
     deps = [
         ":base_layer",
         ":learners",
+        ":optimizer_prefix_vectorization",
         ":optimizers",
         ":py_utils",
         ":schedules",

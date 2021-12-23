@@ -120,7 +120,7 @@ class VectorQuantization(base_layer.BaseLayer):
     means = weight_params(
         shape=[p.num_heads, p.num_clusters, p.dim_per_head],
         init=p.params_init,
-        dtype=self.fprop_dtype,
+        dtype=p.dtype,
         collections=[base_layer.REQUIRES_MEAN_SYNC])
     self.create_variable('means', means, trainable=False)
 
@@ -144,7 +144,7 @@ class VectorQuantization(base_layer.BaseLayer):
              [B, L, N, H].
     """
     p = self.params
-    inputs = jnp.array(inputs, dtype=theta.means.dtype)
+    inputs = self._cast_to_fprop_dtype(inputs)
     inputs_shape = inputs.shape
     if len(inputs_shape) == 3:
       inputs = jnp.reshape(
@@ -266,6 +266,9 @@ class Ngrammer(base_layer.BaseLayer):
       embedding_p.name = f'embedding_{i}'
       embedding_p.vocab_size = p.ngram_vocab_size
       embedding_p.embedding_dims = p.ngram_emb_dim
+      embedding_p.params_init = p.params_init
+      # Copy sharding annotations.
+      embedding_p.weight_split_dims_mapping = p.weight_split_dims_mapping
       ngram_emb_table_p.append(embedding_p)
 
     self.create_children('emb_layer_norm', emb_layer_norm_p)
@@ -297,6 +300,8 @@ class Ngrammer(base_layer.BaseLayer):
       # Shape [B, L, 1]
       paddings_3d = paddings[:, :, jnp.newaxis]
 
+    # Cast input embeddings to fprop dtype.
+    input_embs = self._cast_to_fprop_dtype(input_embs)
     inputs_shape = input_ids.shape
     batch_size = inputs_shape[0]
     seq_length = inputs_shape[1]
@@ -416,7 +421,8 @@ class VQNgrammer(base_layer.BaseLayer):
         num_heads=p.num_heads,
         dim_per_head=p.dim_per_head,
         decay=p.decay,
-        epsilon=p.epsilon)
+        epsilon=p.epsilon,
+        params_init=p.params_init)
     self.create_child('vq_layer', vq_layer_p)
 
     # Create N-gram lookup layer.
@@ -427,7 +433,8 @@ class VQNgrammer(base_layer.BaseLayer):
         concat_ngrams=p.concat_ngrams,
         num_heads=p.num_heads,
         dim_per_head=p.dim_per_head,
-    )
+        params_init=p.params_init,
+        weight_split_dims_mapping=p.weight_split_dims_mapping)
     self.create_child('ngram_layer', ngram_layer_p)
 
   def fprop(self,
@@ -452,6 +459,9 @@ class VQNgrammer(base_layer.BaseLayer):
       outputs: Input embedding with the VQ ngram added of shape [B, L, D].
     """
     del input_ids
+
+    # Cast input embeddings to fprop dtype.
+    input_embs = self._cast_to_fprop_dtype(input_embs)
 
     # Distances of shape [B, L, N, K].
     distances, _ = self.vq_layer.fprop(

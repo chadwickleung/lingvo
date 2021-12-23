@@ -21,11 +21,16 @@ from typing import Any, Callable, NamedTuple, Optional, Sequence, Tuple, Union
 
 from absl import logging
 import jax
+from jax import lax
+
 from jax import numpy as jnp
+from lingvo.jax import base_layer
 from lingvo.jax import gshard_utils
 from lingvo.jax import py_utils
 from lingvo.jax import pytypes
 import optax
+from optax_shampoo import distributed_shampoo
+
 
 NestedMap = py_utils.NestedMap
 InstantiableParams = py_utils.InstantiableParams
@@ -53,6 +58,10 @@ class ShardedGradientTransformation:
   # Constraints: output from this function should be of identical structure as
   # that of the init() function.
   init_partition_spec: TransformInitPartitionSpecFn
+
+
+GeneralGradientTransformation = Union[optax.GradientTransformation,
+                                      ShardedGradientTransformation]
 
 
 def count_init_fn(_):
@@ -189,8 +198,7 @@ class _ShardedAdamHelper:
 
 
 def sharded_chain(
-    *args: Union[optax.GradientTransformation, ShardedGradientTransformation]
-) -> ShardedGradientTransformation:
+    *args: GeneralGradientTransformation) -> ShardedGradientTransformation:
   """Applies a list of (possibly sharded) chainable update transformations.
 
   Given a sequence of chainable transforms, `sharded_chain` returns an `init_fn`
@@ -243,9 +251,10 @@ def sharded_chain(
 
 
 def sharded_masked(
-    inner: Union[ShardedGradientTransformation, optax.GradientTransformation],
-    mask: Union[NestedParams, Callable[[NestedParams], NestedParams]]
-) -> Union[ShardedGradientTransformation, optax.GradientTransformation]:
+    inner: GeneralGradientTransformation, mask: Union[NestedParams,
+                                                      Callable[[NestedParams],
+                                                               NestedParams]]
+) -> GeneralGradientTransformation:
   """Mask updates so only some are transformed, the rest are passed through.
 
   This differs from the Optax version in that it supports sharding annotations.
@@ -472,9 +481,7 @@ class BaseOptimizer:
     """Get the learning rate of this optimizer at a particular step."""
     return self._lr_schedule.value(step_count) * self.params.learning_rate
 
-  def get_grad_transformation(
-      self
-  ) -> Union[optax.GradientTransformation, ShardedGradientTransformation]:
+  def get_grad_transformation(self) -> GeneralGradientTransformation:
     """Get the grad transformation corresponds to this optimizer config.
 
     This is the final gradient transformation that incorporates all
@@ -495,8 +502,7 @@ class BaseOptimizer:
             l2_regularizer_weight=p.l2_regularizer_weight))
 
   def _get_raw_grad_transformation(
-      self, lr: optax.Schedule
-  ) -> Union[optax.GradientTransformation, ShardedGradientTransformation]:
+      self, lr: optax.Schedule) -> GeneralGradientTransformation:
     """Get the raw optimizer transformation without taking into other ...
 
     transformations such l1/l2 regularization, gradient norm clipping, etc.
@@ -588,8 +594,7 @@ class Adam(BaseOptimizer):
     return cls.Params().Set(beta1=0.9, beta2=0.98, epsilon=1e-9)
 
   def _get_raw_grad_transformation(
-      self, lr: optax.Schedule
-  ) -> Union[optax.GradientTransformation, ShardedGradientTransformation]:
+      self, lr: optax.Schedule) -> GeneralGradientTransformation:
     p = self._params
     if p.sharded_adam:
       logging.info('Using sharded_adam.')
@@ -661,6 +666,96 @@ class Adafactor(BaseOptimizer):
         weight_decay_rate=p.weight_decay_rate,
         eps=p.eps,
         factored=p.factored)
+
+
+class DistributedShampoo(BaseOptimizer):
+  """DistributedShampoo optimizer from Optax."""
+
+  @classmethod
+  def Params(cls) -> InstantiableParams:  # pylint: disable=invalid-name
+    p = super().Params()
+    p.Define('block_size', 1024,
+             'Size of the preconditioner (block size x block size).')
+    p.Define('beta1', 0.9, 'Momentum parameter.')
+    p.Define('beta2', 0.999, 'Second moment averaging parameter.')
+    p.Define('matrix_epsilon', 1e-6,
+             'Epsilon parameter as part of computing the inverse-pth roots.')
+    p.Define('weight_decay', 0.0, 'Weight decay.')
+    p.Define('start_preconditioning_step', 101,
+             'Start preconditionining after N steps.')
+    p.Define('preconditioning_compute_steps', 100,
+             'How often to compute the inverse-pth roots.')
+    p.Define('statistics_compute_steps', 1,
+             'How often to compute the statistics.')
+    p.Define('graft_type', distributed_shampoo.GraftingType.ADAGRAD,
+             'Type of Grafting. 1 for SGD, 2 for AdaGrad, 3 for RMSPROP .')
+    p.Define('batch_axis_name', 'batch', 'Batch axis name for pmap.')
+    p.Define('nesterov', True, 'Use nesterov update for momentum.')
+    p.Define('exponent_override', 0, 'Exponent override.')
+    p.Define('moving_average_for_momentum', False,
+             'Moving average for momentum.')
+    p.Define('skip_preconditioning_dim_size_gt', 4096,
+             'Skips preconditioning if any dim is greater than this value.')
+    p.Define('clip_by_scaled_gradient_norm', None,
+             'Clip by scaled gradient norm (if not None).')
+    return p
+
+  @classmethod
+  def ParamsImageClassification(cls) -> InstantiableParams:  # pylint: disable=invalid-name
+    """Common Shampoo config for Image Classification."""
+    return cls.Params().Set(
+        beta1=0.9,
+        beta2=0.95,
+        block_size=128,
+        weight_decay=1e-4,
+        nesterov=True,
+        preconditioning_compute_steps=1,
+        statistics_compute_steps=1,
+        graft_type=distributed_shampoo.GraftingType.SGD)
+
+  @classmethod
+  def ParamsLanguageModeling(cls) -> InstantiableParams:  # pylint: disable=invalid-name
+    """Common Shampoo config for Language Modeling."""
+    return cls.Params().Set(
+        block_size=1536,
+        beta1=0.9,
+        beta2=0.999,
+        clip_gradient_norm_to_value=5.0,
+        weight_decay=0.0,
+        matrix_epsilon=1e-8,
+        graft_type=distributed_shampoo.GraftingType.RMSPROP,
+        nesterov=False,
+        exponent_override=0,
+        start_preconditioning_step=51,
+        preconditioning_compute_steps=50,
+        skip_preconditioning_dim_size_gt=4096,
+        moving_average_for_momentum=True,
+        clip_by_scaled_gradient_norm=1.0)
+
+  def _get_raw_grad_transformation(
+      self, lr: optax.Schedule) -> optax.GradientTransformation:
+    p = self._params
+    return distributed_shampoo.distributed_shampoo(
+        learning_rate=lr,
+        block_size=p.block_size,
+        beta1=p.beta1,
+        beta2=p.beta2,
+        diagonal_epsilon=1e-10,
+        matrix_epsilon=p.matrix_epsilon,
+        weight_decay=p.weight_decay,
+        start_preconditioning_step=p.start_preconditioning_step,
+        preconditioning_compute_steps=p.preconditioning_compute_steps,
+        statistics_compute_steps=p.statistics_compute_steps,
+        best_effort_shape_interpretation=True,
+        graft_type=p.graft_type,
+        nesterov=p.nesterov,
+        exponent_override=p.exponent_override,
+        batch_axis_name=p.batch_axis_name,
+        inverse_failure_threshold=0.1,
+        moving_average_for_momentum=p.moving_average_for_momentum,
+        skip_preconditioning_dim_size_gt=p.skip_preconditioning_dim_size_gt,
+        clip_by_scaled_gradient_norm=p.clip_by_scaled_gradient_norm,
+        precision=lax.Precision.HIGHEST)
 
 
 class Adagrad(BaseOptimizer):
@@ -870,6 +965,7 @@ class _ShardedAdafactorHelper:
       quantized_dtype: jnp.dtype,
       # TODO(bf-jax) Update default value to True, once this is supported.
       respect_skip_lp_regularization: bool,
+      per_var_learning_summary: bool,
   ) -> None:
     """Constructor. See ShardedAdafactor() below."""
     self._learning_rate_fn = learning_rate_fn
@@ -884,6 +980,7 @@ class _ShardedAdafactorHelper:
     self._epsilon1 = epsilon1
     self._quantized_dtype = quantized_dtype
     self._respect_skip_lp_regularization = respect_skip_lp_regularization
+    self._per_var_learning_summary = per_var_learning_summary
 
   def should_use_factored_second_moment_estimate(self, shape):
     """Should we use a factored second moment estimator.
@@ -964,15 +1061,11 @@ class _ShardedAdafactorHelper:
     shape = var_param.shape
     tensor_split_dims_mapping = var_param.tensor_split_dims_mapping
 
-    if var_param.repeat_prefix is not None:
-      prefix_shape = var_param.repeat_prefix
-      prefix_sharding = var_param.repeat_prefix_split_dims_mapping
-      if prefix_sharding is None:
-        prefix_sharding = [-1] * len(prefix_shape)
-      shape = tuple(prefix_shape) + tuple(shape)
-      if tensor_split_dims_mapping is not None:
-        tensor_split_dims_mapping = (
-            tuple(prefix_sharding) + tuple(tensor_split_dims_mapping))
+    if var_param.repeat_prefix:
+      raise ValueError(
+          'ShardedAdafactor: repeat_prefix is not empty. Consider using '
+          'get_transformations_with_vectorized_repeat_prefix to vectorize '
+          'prefix dimensions.')
 
     if tensor_split_dims_mapping is not None:
       assert len(tensor_split_dims_mapping) == len(shape)
@@ -980,9 +1073,6 @@ class _ShardedAdafactorHelper:
     else:
       sharding_specified = False
 
-    # TODO(yonghui): Fix me. For stacked weight (which is a stack of multiple
-    # logical weights), we should be performing data aggregation on the right
-    # axis, not always on the first two.
     if self._beta1:
       if self._quantized_dtype == jnp.bfloat16:
         output_m = py_utils.weight_params(
@@ -1067,7 +1157,7 @@ class _ShardedAdafactorHelper:
         array, nan=replacement, posinf=replacement, neginf=replacement)
 
   def compute_var_and_slot_update(self, count, grad, m, m_scale, vr, vc, v,
-                                  param):
+                                  param, var_name):
     """Computes the var and optimizer slots updates for a single variable."""
     # We can probably skip this step
     grad = self.sanitize_values(grad)
@@ -1125,6 +1215,13 @@ class _ShardedAdafactorHelper:
       new_v = decay_rate * v + mixing_rate * grad_squared
       output_v = new_v
       x = grad / jnp.sqrt(new_v)
+
+    if self._per_var_learning_summary:
+      # Add summary for this var.
+      x_l2_scale = jnp.sqrt(reduce_mean(x * x))
+      base_layer.add_summary(f'sharded_adafactor_learning/{var_name}',
+                             x_l2_scale)
+
     if self._clipping_threshold is not None:
       clipping_denom = jnp.maximum(1., reduce_rms(x) / self._clipping_threshold)
       clipping_denom = self.sanitize_values(clipping_denom, replacement=1.)
@@ -1179,7 +1276,8 @@ def sharded_adafactor(
     epsilon1: float = 1e-30,
     quantized_dtype: jnp.dtype = jnp.int8,
     # TODO(bf-jax) Update default value to True, once this is supported.
-    respect_skip_lp_regularization: bool = False
+    respect_skip_lp_regularization: bool = False,
+    per_var_learning_summary=False,
 ) -> ShardedGradientTransformation:
   """AdaFactor optimizer that supports SPMD sharding.
 
@@ -1224,6 +1322,8 @@ def sharded_adafactor(
       are stored as bfloat16, instead of quantized integers.
     respect_skip_lp_regularization: whether or not to respect lingvo
       SKIP_LP_REGULARIZATION var collection that skips decoupled weight decay.
+    per_var_learning_summary: a bool, whether or not to export per-var learning
+      summaries.
 
   Returns:
     A `ShardedGradientTransformation`.
@@ -1250,7 +1350,8 @@ def sharded_adafactor(
       factored=factored,
       epsilon1=epsilon1,
       quantized_dtype=quantized_dtype,
-      respect_skip_lp_regularization=respect_skip_lp_regularization)
+      respect_skip_lp_regularization=respect_skip_lp_regularization,
+      per_var_learning_summary=per_var_learning_summary)
 
   def init_fn(params):
     """Initializes the optimizer's state."""
@@ -1283,9 +1384,10 @@ def sharded_adafactor(
 
     compute_var_and_slot_update_fn = functools.partial(
         sharded_adafactor_helper.compute_var_and_slot_update, state.count)
+    var_names = py_utils.extract_prefixed_keys_from_nested_map(updates)
     output = jax.tree_multimap(compute_var_and_slot_update_fn, updates, state.m,
                                state.m_scale, state.vr, state.vc, state.v,
-                               params)
+                               params, var_names)
     updates = jax.tree_map(lambda o: o.update, output)
     count_plus_one = state.count + jnp.array(1, jnp.int32)
     updated_states = sharded_adafactor_helper.to_state(count_plus_one, output)
@@ -1332,6 +1434,8 @@ class ShardedAdafactor(BaseOptimizer):
         False,
         'Whether or not to respect lingvo SKIP_LP_REGULARIZATION var '
         'collection that skips decoupled weight decay.')
+    p.Define('per_var_learning_summary', False,
+             'If True, output per var learning summary.')
     return p
 
   def _get_raw_grad_transformation(
@@ -1349,4 +1453,5 @@ class ShardedAdafactor(BaseOptimizer):
         factored=p.factored,
         epsilon1=p.epsilon1,
         quantized_dtype=getattr(jnp, p.quantized_dtype),
-        respect_skip_lp_regularization=p.respect_skip_lp_regularization)
+        respect_skip_lp_regularization=p.respect_skip_lp_regularization,
+        per_var_learning_summary=p.per_var_learning_summary)

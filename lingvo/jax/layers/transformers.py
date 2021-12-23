@@ -32,6 +32,7 @@ from lingvo.jax.layers import linears
 from lingvo.jax.layers import normalizations
 from lingvo.jax.layers import recurrent
 from lingvo.jax.layers import repeats
+from lingvo.jax.layers import stats
 from lingvo.jax.layers import stochastics
 import numpy as np
 import tensorflow.compat.v2 as tf
@@ -193,13 +194,19 @@ class TransformerFeedForward(base_layer.BaseLayer):
         'Otherwise, add a residual projection layer '
         'followed by batch normalization.')
     p.Define('hidden_dims', 0, 'Hidden dimension of FFN')
+    p.Define('has_bias', True, 'Adds bias weights to Feedforward or not.')
+    p.Define(
+        'apply_padding_first', False,
+        'Apply padding to inputs before everything else or not. For '
+        'example, it is better to apply padding before batch norm.')
     p.Define(
         'activation', 'RELU', 'Activation function to use.'
         'Options are RELU, RELU6, RELU^2, RELU^3, SIGMOID, TANH, GELU,'
-        'GATED_SILU, NONE.')
+        'GATED_GELU, GATED_SILU, NONE.')
     p.Define('fflayer_tpl', linears.FeedForward.Params(),
              'Feedforward layer params')
-    p.Define('ln_tpl', normalizations.LayerNorm.Params(), 'Layer norm params')
+    p.Define('ln_tpl', normalizations.LayerNorm.Params(),
+             'Layer norm params, other options include RmsNorm as well.')
     p.Define('residual_dropout_prob', 0., 'Residual dropout')
     p.Define(
         'relu_dropout_tpl', stochastics.Dropout.Params(),
@@ -282,6 +289,7 @@ class TransformerFeedForward(base_layer.BaseLayer):
     ffn1_p = p.fflayer_tpl.Copy()
     ffn1_p.name = 'ffn_layer1'
     ffn1_p.input_dims = p.input_dims
+    ffn1_p.has_bias = p.has_bias
     ffn1_p.activation = activation
     ffn1_p.output_dims = p.hidden_dims
     ffn1_p.weight_split_dims_mapping.wt = wp.ffn0
@@ -289,10 +297,11 @@ class TransformerFeedForward(base_layer.BaseLayer):
     self.create_child('ffn_layer1', ffn1_p)
 
     if self._is_ffn1_gated:
-      # This is a gated ffw network.
+      # This is a gated ffw network, corresponding to gshard_builder's wi0
       gate_p = p.fflayer_tpl.Copy()
       gate_p.name = 'ffn_layer1_gate'
       gate_p.input_dims = p.input_dims
+      gate_p.has_bias = p.has_bias
       gate_p.activation = gate_activation
       gate_p.output_dims = p.hidden_dims
       gate_p.weight_split_dims_mapping.wt = wp.ffn0
@@ -308,6 +317,7 @@ class TransformerFeedForward(base_layer.BaseLayer):
     ffn2_p = p.fflayer_tpl.Copy()
     ffn2_p.name = 'ffn_layer2'
     ffn2_p.input_dims = p.hidden_dims
+    ffn2_p.has_bias = p.has_bias
     ffn2_p.activation = 'NONE'
     ffn2_p.output_dims = p.projection_dims
     ffn2_p.weight_split_dims_mapping.wt = wp.ffn1
@@ -324,6 +334,13 @@ class TransformerFeedForward(base_layer.BaseLayer):
             inputs: JTensor,
             paddings: Optional[JTensor] = None) -> JTensor:
     p = self.params
+    # Expand paddings to last dim if not None to have shape [batch, time, 1]
+    if paddings is not None:
+      paddings = jnp.expand_dims(paddings, axis=-1)
+
+    if p.apply_padding_first and paddings is not None:
+      inputs *= (1.0 - paddings)
+
     if p.norm_policy == 'primer_hybrid':
       inputs_normalized = self.pre_layer_norm.fprop(theta.pre_layer_norm,
                                                     inputs)
@@ -332,14 +349,12 @@ class TransformerFeedForward(base_layer.BaseLayer):
     else:
       inputs_normalized = inputs
 
-    # Expand paddings to last dim if not None to have shape [batch, time, 1]
-    if paddings is not None:
-      paddings = jnp.expand_dims(paddings, axis=-1)
-
     # Apply first FFN layer
     if self._is_ffn1_gated:
+      # theta.ffn_layer1_gate corresponds to gshard_builder's wi0
       gate_value = self.ffn_layer1_gate.fprop(theta.ffn_layer1_gate,
                                               inputs_normalized)
+      # theta.ffn_layer1 corresponds to gshard_builder's wi1
       projected_inputs = gate_value * self.ffn_layer1.fprop(
           theta.ffn_layer1, inputs_normalized)
     else:
@@ -348,7 +363,7 @@ class TransformerFeedForward(base_layer.BaseLayer):
       projected_inputs = checkpoint_name(projected_inputs, 'ffn1')
 
     # Apply paddings if not None
-    if paddings is not None:
+    if not p.apply_padding_first and paddings is not None:
       projected_inputs *= (1.0 - paddings)
 
     # Apply RELU dropout
@@ -360,7 +375,7 @@ class TransformerFeedForward(base_layer.BaseLayer):
     projected_inputs = checkpoint_name(projected_inputs, 'ffn2')
 
     # Apply paddings if not None
-    if paddings is not None:
+    if not p.apply_padding_first and paddings is not None:
       projected_inputs *= (1.0 - paddings)
 
     # Apply Primer normalization before dropout.
@@ -460,6 +475,8 @@ class TransformerFeedForwardMoe(base_layer.BaseLayer):
         'reduce the size of individual weight params.')
     p.Define('second_expert_policy', 'all',
              'How to pick second expert: all, sampling or random.')
+    p.Define('internal_gshard_variance_scaling_fan_in_init', True,
+             'Internal. Do not use. To study MoE layer init.')
 
     # SPMD partition related params.
     # M - model_dim, for both inputs and outputs
@@ -502,7 +519,8 @@ class TransformerFeedForwardMoe(base_layer.BaseLayer):
     assert (p.expert_capacity_factor or p.expert_capacity_dim)
     assert p.num_experts > 0
     assert p.num_groups > 0
-    assert p.expert_weight_shards > 0
+    assert p.expert_weight_shards == 1, (
+        f'[Deprecated] Should be removed {p.expert_weight_shards} != 1')
 
     if p.norm_policy == 'primer_hybrid':
       params = p.ln_tpl.Copy()
@@ -543,14 +561,20 @@ class TransformerFeedForwardMoe(base_layer.BaseLayer):
 
     # First create the gating network.
     wp = p.weight_split_dims_mapping
-    stddev = (1.0 / p.input_dims)**0.5
-    gate_scale = stddev * 3.0**0.5
+    gate_init = None  # default xavier init
+    if p.internal_gshard_variance_scaling_fan_in_init:
+      # TODO(lepikhin): this init is related with Adafactor settings, study
+      stddev = (1.0 / p.input_dims)**0.5
+      gate_scale = stddev * 3.0**0.5
+      gate_init = WeightInit.Uniform(gate_scale)
     gate_pc = weight_params(
         shape=[p.input_dims, p.num_experts],
-        init=WeightInit.Uniform(gate_scale),
+        init=gate_init,
         dtype=p.dtype,
         device_mesh=p.device_mesh,
         tensor_split_dims_mapping=wp.me)
+    for l in gate_pc.ToText().split('\n'):
+      logging.debug('moe gate weight_params %s', l)
     self.create_variable('gate', gate_pc)
 
     # Next create the expert network.
@@ -560,15 +584,19 @@ class TransformerFeedForwardMoe(base_layer.BaseLayer):
     emh_shape = [
         p.num_experts, p.input_dims // p.expert_weight_shards, p.hidden_dims
     ]
-    stddev = (1.0 / p.input_dims)**0.5
-    wi_init_scale = stddev * 3.0**0.5
+    wi_init = None
+    if p.internal_gshard_variance_scaling_fan_in_init:
+      stddev = (1.0 / p.input_dims)**0.5
+      wi_init_scale = stddev * 3.0**0.5
+      wi_init = WeightInit.Uniform(wi_init_scale)
     wi_pc = weight_params(
         shape=emh_shape,
-        init=WeightInit.Uniform(wi_init_scale),
+        init=wi_init,
         dtype=p.dtype,
         device_mesh=p.device_mesh,
         tensor_split_dims_mapping=wp.emh)
-
+    for l in wi_pc.ToText().split('\n'):
+      logging.debug('moe wi weight_params %s', l)
     for ii in range(p.expert_weight_shards):
       self.create_variable('wi_%d' % ii, wi_pc)
 
@@ -578,19 +606,22 @@ class TransformerFeedForwardMoe(base_layer.BaseLayer):
     ehm_shape = [
         p.num_experts, p.hidden_dims, output_dims // p.expert_weight_shards
     ]
-    stddev = (1.0 / p.hidden_dims)**0.5
-    wo_init_scale = stddev * 3.0**0.5
+    wo_init = None
+    if p.internal_gshard_variance_scaling_fan_in_init:
+      wi_init = None
+      stddev = (1.0 / p.hidden_dims)**0.5
+      wo_init_scale = stddev * 3.0**0.5
+      wo_init = WeightInit.Uniform(wo_init_scale)
     wo_pc = weight_params(
         shape=ehm_shape,
-        init=WeightInit.Uniform(wo_init_scale),
+        init=wo_init,
         dtype=p.dtype,
         device_mesh=p.device_mesh,
         tensor_split_dims_mapping=wp.ehm)
-
+    for l in wo_pc.ToText().split('\n'):
+      logging.debug('moe wo weight_params %s', l)
     for ii in range(p.expert_weight_shards):
       self.create_variable('wo_%d' % ii, wo_pc)
-
-    # TODO(zhangqiaorjc): Possibly add bias variable.
 
   # TODO(zhangqiaorjc): Allow paddings to be optional?
   def fprop(self, theta: NestedMap, inputs: JTensor,
@@ -673,8 +704,9 @@ class TransformerFeedForwardMoe(base_layer.BaseLayer):
         mask_dtype=jnp.int32)
 
     aux_loss, combine_tensor, dispatch_tensor, summary = gating
-    over_capacity_1, over_capacity_2 = summary
-    del over_capacity_1, over_capacity_2  # TODO(lepikhin): propagate
+    over_capacity_1_ratio, over_capacity_2_ratio = summary
+    base_layer.add_summary('over_capacity_1_ratio', over_capacity_1_ratio)
+    base_layer.add_summary('over_capacity_2_ratio', over_capacity_2_ratio)
 
     if fprop_dtype != np.float32:
       aux_loss = aux_loss.astype(fprop_dtype)
@@ -916,6 +948,12 @@ class Transformer(base_layer.BaseLayer):
     """
     # Layer normalize input
     p = self.params
+
+    inputs_stats = stats.compute_stats(inputs, jnp.expand_dims(paddings, -1))
+    base_layer.add_summary('xformer_input_mean', inputs_stats.mean_v)
+    base_layer.add_summary('xformer_input_std', inputs_stats.std_v)
+    base_layer.add_summary('xformer_input_abs_max', inputs_stats.max_v)
+
     if p.norm_policy == 'primer_hybrid':
       inputs_normalized = self.pre_layer_norm.fprop(theta.pre_layer_norm,
                                                     inputs)
@@ -1249,6 +1287,8 @@ class StackedTransformer(base_layer.BaseLayer):
 
     if p.enable_while_loop:
 
+      num_blocks = p.num_layers // p.num_layers_per_block
+
       def _stack_vars(*args):
         args = [x[jnp.newaxis, :] for x in args]
         return jnp.vstack(args)
@@ -1306,18 +1346,32 @@ class StackedTransformer(base_layer.BaseLayer):
                                               cross_attention_mask)
           if al_ctx.aux_losses:
             assert isinstance(al_ctx.aux_losses, list)
-            aux_loss = aux_loss + sum(al_ctx.aux_losses).astype(
-                self.fprop_dtype)
+            aux_loss_inc = sum(al_ctx.aux_losses).astype(self.fprop_dtype)
+            base_layer.add_summary('aux_loss_inc', aux_loss_inc)
+            aux_loss = aux_loss + aux_loss_inc
 
         return py_utils.NestedMap(
             x_in=x_out, aux_loss=aux_loss), py_utils.NestedMap()
 
-      carry_final, _ = recurrent.scan(
+      carry_final, _, summaries = recurrent.scan(
           carry,
           stacked_vars,
           _scan_fn,
           root_layer=self,
           checkpoint_policy=p.checkpoint_policy)
+
+      # Now unpack summaries to the out-context.
+      # Q(yonghui): Shall we move summary handling to be within recurrent.scan?
+      for summary_key, summary_value in summaries.items():
+        # unstack summary_value
+        logging.info((summary_key, summary_value))
+        assert summary_value.shape[0] == num_blocks
+        unstacked_values = jnp.split(summary_value, num_blocks)
+        # Q(yonghui): shall we keep the summaries packed instead?
+        for i, v in enumerate(unstacked_values):
+          # TODO(yonghui): Here we assume summaries are all scalar values.
+          base_layer.add_summary(f'{summary_key}/{i}', v)
+
       x_out = carry_final.x_in
       aux_loss_ctx = py_utils.AuxLossContext.Current()
       # Scan can not have sideeffects so we have to capture side effect
@@ -1672,6 +1726,16 @@ class TransformerLm(base_layer.BaseLayer):
     # Softmax weight is of shape [input_dim, vocab_size].
     softmax_p = lm_p.softmax_tpl
     softmax_p.weight_split_dims_mapping.wt = [data_axis, mdl_axis]
+
+    pos_emb_p = lm_p.position_emb_tpl
+    pos_emb_p.weight_split_dims_mapping.wt = [data_axis, mdl_axis]
+
+    # NGrammer embedding table is currently replicated.
+    # TODO(aurkor): Explore different sharding configs for the table.
+    # n-gram table is of shape [ngram_vocab_size, embedding_dims].
+    if lm_p.ngrammer_tpl is not None:
+      ngrammer_p = lm_p.ngrammer_tpl
+      ngrammer_p.weight_split_dims_mapping.wt = [mdl_axis, data_axis]
     if mode == 'train':
       # During training, softmax output is 3d.
       softmax_p.activation_split_dims_mapping.out = [
