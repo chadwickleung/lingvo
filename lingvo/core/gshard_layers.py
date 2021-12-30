@@ -2587,6 +2587,7 @@ def FeedForwardNetworksApplyGating(gating,
         _NewOrHistoricSplit(gating.combine_tensor, gsec_split),
         _NewOrHistoricSplit(expert_outputs, gecm_split),
         name='combined_outputs_gsm')
+  t_combine_end = time.time()
 
   outputs = _NewOrHistoricSplit(
       tf.reshape(combined_outputs, py_utils.GetShape(inputs)), gsm_split)
