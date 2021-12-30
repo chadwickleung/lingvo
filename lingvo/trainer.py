@@ -834,7 +834,9 @@ class RunnerManager:
 
     assert FLAGS.mode in ['sync', 'async']
 
+    # Not running locally
     self.MaybeConfigRunLocally()
+    
     self.MaybeConfigRunDistributed()
     self.MaybeConfigCloudTpu()
     self.MaybeLaunchTensorFlow()
