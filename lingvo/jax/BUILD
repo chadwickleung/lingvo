@@ -15,7 +15,6 @@ pytype_strict_binary(
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [
-        ":checkpoints",
         ":eval",
         ":train",
         # Implicit absl.app dependency.
@@ -93,6 +92,8 @@ pytype_strict_library(
     srcs = ["checkpoints.py"],
     srcs_version = "PY3",
     deps = [
+        ":asserts",
+        ":checkpoint_py_pb2",
         ":py_utils",
         ":train_states",
         # Implicit absl.logging dependency.
@@ -101,7 +102,18 @@ pytype_strict_library(
         # Implicit jax dependency.
         # Implicit jax/experimental/gda_serialization:google_spec dependency.
         # Implicit jax/experimental/gda_serialization:serialization dependency.
-        # Implicit numpy dependency.
+        # Implicit tensorflow dependency.
+    ],
+)
+
+pytype_strict_library(
+    name = "checkpoint_managers",
+    srcs = ["checkpoint_managers.py"],
+    deps = [
+        ":checkpoint_py_pb2",
+        ":py_utils",
+        # Implicit absl.logging dependency.
+        # Implicit jax dependency.
         # Implicit tensorflow dependency.
     ],
 )
@@ -113,6 +125,7 @@ pytype_strict_library(
     deps = [
         ":base_layer",
         ":base_model_params",
+        ":checkpoint_py_pb2",
         ":model_utils",
         ":py_utils",
         ":pytypes",
@@ -139,6 +152,12 @@ pytype_strict_library(
         # Implicit jax dependency.
         # Implicit numpy dependency.
     ],
+)
+
+pytype_strict_library(
+    name = "io_utils",
+    srcs = ["io_utils.py"],
+    srcs_version = "PY3",
 )
 
 pytype_strict_library(
@@ -337,6 +356,9 @@ pytype_strict_library(
     srcs_version = "PY3",
     deps = [
         ":base_input",
+        ":base_model_params",
+        ":checkpoint_managers",
+        ":checkpoint_py_pb2",
         ":model_utils",
         ":py_utils",
         ":summary_utils",
@@ -386,6 +408,19 @@ py_strict_test(
         ":asserts",
         # Implicit absl.testing.absltest dependency.
         # Implicit absl.testing.parameterized dependency.
+    ],
+)
+
+py_strict_test(
+    name = "checkpoint_managers_test",
+    srcs = ["checkpoint_managers_test.py"],
+    deps = [
+        ":checkpoint_managers",
+        ":checkpoint_py_pb2",
+        # Implicit absl.flags dependency.
+        # Implicit absl.testing.absltest dependency.
+        # Implicit absl.testing.parameterized dependency.
+        # Implicit tensorflow dependency.
     ],
 )
 
@@ -461,9 +496,13 @@ py_strict_test(
     ],
 )
 
-pytype_strict_library(
-    name = "io_utils",
-    srcs = ["io_utils.py"],
-    srcs_version = "PY3",
-    deps = [],
+proto_library(
+    name = "checkpoint_proto",
+    srcs = ["checkpoint.proto"],
+)
+
+py_proto_library(
+    name = "checkpoint_py_pb2",
+    api_version = 2,
+    deps = [":checkpoint_proto"],
 )
