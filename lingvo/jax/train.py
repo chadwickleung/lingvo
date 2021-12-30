@@ -16,8 +16,10 @@
 """Training loop for lingvo Jax model."""
 
 import contextlib
+import datetime
 import functools
 import os
+import re
 import time
 from typing import Optional, Sequence
 
@@ -26,6 +28,9 @@ import jax
 from jax.experimental import maps
 from jax.experimental import mesh_utils
 from lingvo.jax import base_input
+from lingvo.jax import base_model_params
+from lingvo.jax import checkpoint_managers
+from lingvo.jax import checkpoint_pb2
 from lingvo.jax import model_utils
 from lingvo.jax import py_utils
 from lingvo.jax import summary_utils
@@ -34,33 +39,14 @@ import tensorflow.compat.v2 as tf
 
 from lingvo.jax import checkpoints
 
+CheckpointType = checkpoint_pb2.CheckpointType
 InstantiableParams = py_utils.InstantiableParams
 
 
-def train_and_evaluate(model_name: str, job_log_dir: Optional[str],
-                       multi_host_checkpointing: Optional[bool],
-                       checkpoint_type: checkpoints.CheckpointType,
-                       restore_checkpoint_dir: Optional[str],
-                       restore_checkpoint_step: Optional[int],
-                       eval_on_test: Optional[bool]) -> None:
-  """Runs the training and evaluation loop.
-
-  Args:
-    model_name: The name of the model from the registry to train.
-    job_log_dir: The directory for the job logs.
-    multi_host_checkpointing: Whether to use multi-host checkpointing.
-    checkpoint_type: Type of model checkpointing method to use.
-    restore_checkpoint_dir: If set, the directory from which to restore
-      checkpoint. If unset, use job_log_dir's `checkpoints` subdirectory
-      instead.
-    restore_checkpoint_step: If set, the checkpoint step to restore. If unset,
-      try to restore from the latest checkpoint if any.
-    eval_on_test: Whether to eval on test as a part of the training loop.
-  """
-  model_config = model_utils.get_model(model_name)()
-
+def _write_params_file(model_config: base_model_params.BaseModelParams,
+                       job_log_dir: str) -> None:
+  """Writes a params file into the root `job_log_dir`."""
   if jax.process_index() == 0:
-    # Write out the params file.
     params_fpath = os.path.join(job_log_dir, 'model_params.txt')
     if not tf.io.gfile.exists(job_log_dir):
       tf.io.gfile.makedirs(job_log_dir)
@@ -71,7 +57,95 @@ def train_and_evaluate(model_name: str, job_log_dir: Optional[str],
         params_file.write('\n\n')
       params_file.write(model_config.task().ToText())
 
+
+def _checkpoint_dir(job_log_dir: str) -> str:
+  """Returns the checkpoint directory from the root `job_log_dir`."""
+  return os.path.join(job_log_dir, 'checkpoints')
+
+
+def _parse_duration(
+    duration_str: Optional[str]) -> Optional[datetime.timedelta]:
+  """Parses a duration string and returns the datetime.timedelta instance.
+
+  Args:
+    duration_str: A string representing a duration or None. Either (a) an
+      integer, the implicit unit being the second, (b) an integer followed by
+      's', e.g. '30s', the unit being the second, (c) an integer followed by
+      'm', e.g. '15m', the unit being the minute, (d) an integer followed by
+      'h', e.g. '2h', the unit being the hour or (e) an integer followed by 'd',
+      e.g. '1d' the unit being the hour.
+
+  Returns:
+    The corresponding duration as a datetime.timedelta instance or None if the
+    input was None.
+  """
+  if not duration_str:
+    return None
+  pattern = re.compile(r'(\d+)(\w)*')
+  match = pattern.match(duration_str)
+  if (not match or len(match.groups()) != 2 or
+      match.group(2) not in {None, 's', 'm', 'h', 'd'}):
+    raise ValueError(f'Unable to parse string duration `{duration_str}`.')
+  int_value = int(match.group(1))
+  if match.group(2) is None or match.group(2) == 's':
+    pass
+  elif match.group(2) == 'm':
+    int_value *= 60
+  elif match.group(2) == 'h':
+    int_value *= 3600
+  elif match.group(2) == 'd':
+    int_value *= 86400
+  else:
+    raise ValueError(f'Unable to parse string duration `{duration_str}`.')
+  return datetime.timedelta(seconds=int_value)
+
+
+def _create_checkpoint_manager(
+    model_name: str,
+    model_p: InstantiableParams,
+    job_log_dir: str,
+    checkpoint_type: CheckpointType,
+) -> checkpoint_managers.CheckpointManager:
+  """Creates a checkpoint manager."""
+  checkpoint_dir = _checkpoint_dir(job_log_dir)
+  train_p = model_p.train
+  max_to_keep = train_p.save_max_to_keep
+  save_interval_steps = train_p.save_interval_steps
+  keep_interval_timedelta = _parse_duration(train_p.save_keep_interval_duration)
+  return checkpoint_managers.CheckpointManager(
+      config_name=model_name,
+      root_dir=checkpoint_dir,
+      checkpoint_type=checkpoint_type,
+      max_to_keep=max_to_keep,
+      save_interval_steps=save_interval_steps,
+      keep_interval_timedelta=keep_interval_timedelta)
+
+
+def train_and_evaluate(model_name: str, job_log_dir: Optional[str],
+                       multi_host_checkpointing: Optional[bool],
+                       maybe_use_persistence_checkpointing: bool,
+                       restore_checkpoint_dir: Optional[str],
+                       restore_checkpoint_step: Optional[int],
+                       eval_on_test: Optional[bool]) -> None:
+  """Runs the training and evaluation loop.
+
+  Args:
+    model_name: The name of the model from the registry to train.
+    job_log_dir: The directory for the job logs.
+    multi_host_checkpointing: Whether to use multi-host checkpointing.
+    maybe_use_persistence_checkpointing: If set, it will try to use
+      persistence-based checkpointing if suitable.
+    restore_checkpoint_dir: If set, the directory from which to restore
+      checkpoint. If unset, use job_log_dir's `checkpoints` subdirectory
+      instead.
+    restore_checkpoint_step: If set, the checkpoint step to restore. If unset,
+      try to restore from the latest checkpoint if any.
+    eval_on_test: Whether to eval on test as a part of the training loop.
+  """
+  model_config = model_utils.get_model(model_name)()
+  _write_params_file(model_config, job_log_dir)
   model_p = model_config.task()
+
   for inp in model_config.datasets():
     if not isinstance(inp, base_input.BaseInputParams):
       raise ValueError('Expecting BaseInputParams from datasets(), got: '
@@ -89,20 +163,28 @@ def train_and_evaluate(model_name: str, job_log_dir: Optional[str],
   if 'bucket_batch_limit' in train_input_p:
     logging.info('train_input_p.bucket_batch_limit: %s',
                  train_input_p.bucket_batch_limit)
+
+  checkpoint_type = checkpoints.retrieve_checkpoint_type(
+      multi_host_checkpointing, maybe_use_persistence_checkpointing, model_p)
+
+  checkpoint_manager = _create_checkpoint_manager(model_name, model_p,
+                                                  job_log_dir, checkpoint_type)
+
   if model_p.device_mesh is not None:
     train_and_evaluate_spmd_model(model_p, train_input_p, job_log_dir,
-                                  multi_host_checkpointing, checkpoint_type,
+                                  checkpoint_manager, checkpoint_type,
                                   restore_checkpoint_dir,
                                   restore_checkpoint_step, eval_input_p)
   else:
     train_and_evaluate_pmap(model_p, train_input_p, job_log_dir,
-                            checkpoint_type, restore_checkpoint_dir,
+                            checkpoint_manager, restore_checkpoint_dir,
                             restore_checkpoint_step, eval_input_p)
 
 
 def train_and_evaluate_pmap(
     model_p: InstantiableParams, train_input_p: InstantiableParams,
-    job_log_dir: Optional[str], checkpoint_type: checkpoints.CheckpointType,
+    job_log_dir: Optional[str],
+    checkpoint_manager: checkpoint_managers.CheckpointManager,
     restore_checkpoint_dir: Optional[str],
     restore_checkpoint_step: Optional[int],
     eval_input_p: Optional[Sequence[InstantiableParams]]) -> None:
@@ -112,7 +194,8 @@ def train_and_evaluate_pmap(
     model_p: Params for the data parallel model.
     train_input_p: Params for the train data input pipeline.
     job_log_dir: Directory for the job logs.
-    checkpoint_type: Type of model checkpointing method to use.
+    checkpoint_manager: A checkpoint manager controlling how often to save and
+      delete checkpoints.
     restore_checkpoint_dir: If set, the directory from which to restore
       checkpoint. If unset, use job_log_dir's `checkpoints` subdirectory
       instead.
@@ -134,7 +217,7 @@ def train_and_evaluate_pmap(
   prng_key = jax.random.PRNGKey(1234)
   prng_key, init_key = jax.random.split(prng_key)
 
-  checkpoint_dir = os.path.join(job_log_dir, 'checkpoints')
+  checkpoint_dir = _checkpoint_dir(job_log_dir)
   restore_checkpoint_dir = restore_checkpoint_dir or checkpoint_dir
   model_states = trainer_lib.initialize_model_state(jax_model, init_key)
   model_states = checkpoints.restore_checkpoint(
@@ -142,8 +225,7 @@ def train_and_evaluate_pmap(
       restore_checkpoint_dir,
       global_mesh=None,
       mesh_axes=None,
-      step=restore_checkpoint_step,
-      checkpoint_type=checkpoint_type)
+      step=restore_checkpoint_step)
   total_num_params = jax_model.total_num_vars
   replicated_model_states = trainer_lib.replicate_model_state(model_states)
   # Unreplicated model states are not needed anymore at that point.
@@ -242,13 +324,10 @@ def train_and_evaluate_pmap(
       if summary_last_step is None:
         summary_last_step = step_i - 1
 
-      if (jax.process_index() == 0 and
-          step_i % train_p.save_interval_steps == 0):
-        checkpoints.save_checkpoint(
-            replicated_model_states,
-            checkpoint_dir,
-            checkpoint_type=checkpoint_type,
-            max_checkpoints=train_p.save_max_to_keep)
+      if checkpoint_manager.should_save(step_i):
+        if jax.process_index() == 0:
+          checkpoints.save_checkpoint(replicated_model_states, checkpoint_dir)
+        checkpoint_manager.save_metadata(global_step_id=step_i)
 
       if step_i <= 5:
         logging.info('step=`%d`: Retrieving model inputs.', step_i)
@@ -331,9 +410,9 @@ def train_and_evaluate_pmap(
 
 def train_and_evaluate_spmd_model(
     model_p: InstantiableParams, train_input_p: InstantiableParams,
-    job_log_dir: Optional[str], multi_host_checkpointing: bool,
-    checkpoint_type: checkpoints.CheckpointType,
-    restore_checkpoint_dir: Optional[str],
+    job_log_dir: Optional[str],
+    checkpoint_manager: checkpoint_managers.CheckpointManager,
+    checkpoint_type: CheckpointType, restore_checkpoint_dir: Optional[str],
     restore_checkpoint_step: Optional[int],
     eval_input_p: Optional[Sequence[InstantiableParams]]) -> None:
   """Runs the training and evaluation loop.
@@ -342,8 +421,9 @@ def train_and_evaluate_spmd_model(
     model_p: Params for the SPMD model.
     train_input_p: Params for the train data pipeline.
     job_log_dir: Directory for the job logs.
-    multi_host_checkpointing: Whether to use multi-host checkpointing.
-    checkpoint_type: Type of model checkpointing method to use.
+    checkpoint_manager: A checkpoint manager controlling how often to save and
+      delete checkpoints.
+    checkpoint_type: The type of checkpoint to use.
     restore_checkpoint_dir: If set, the directory from which to restore
       checkpoint. If unset, use job_log_dir's `checkpoints` subdirectory
       instead.
@@ -360,12 +440,11 @@ def train_and_evaluate_spmd_model(
   prng_key = jax.random.PRNGKey(1234)
   prng_key, init_key = jax.random.split(prng_key)
 
-  checkpoint_dir = os.path.join(job_log_dir, 'checkpoints')
+  checkpoint_dir = _checkpoint_dir(job_log_dir)
   restore_checkpoint_dir = restore_checkpoint_dir or checkpoint_dir
   # Note that GDA checkpoint requires all processes to participate in
   # checkpointing but it does not require a separate checkpoint_dir per process.
-  if (multi_host_checkpointing and
-      not jax.config.jax_parallel_functions_output_gda):
+  if checkpoint_type == CheckpointType.CHECKPOINT_MULTI_HOST_FLAX:
     checkpoint_task_dir = os.path.join(checkpoint_dir,
                                        f'{jax.process_index():03d}')
     restore_checkpoint_task_dir = os.path.join(restore_checkpoint_dir,
@@ -373,6 +452,10 @@ def train_and_evaluate_spmd_model(
   else:
     checkpoint_task_dir = checkpoint_dir
     restore_checkpoint_task_dir = restore_checkpoint_dir
+
+  multi_host_checkpointing = bool(checkpoint_type in {
+      CheckpointType.CHECKPOINT_MULTI_HOST_FLAX, CheckpointType.CHECKPOINT_GDA
+  })
 
   if jax.process_index() == 0:
     tf.io.gfile.makedirs(checkpoint_dir)
@@ -491,7 +574,7 @@ def train_and_evaluate_spmd_model(
         if summary_last_step is None:
           summary_last_step = step_i - 1
 
-        if step_i % train_p.save_interval_steps == 0:
+        if checkpoint_manager.should_save(step_i):
           logging.info('Saving a ckpt at step: %d', step_i)
           if multi_host_checkpointing:
             py_utils.sync_global_devices(
@@ -502,8 +585,8 @@ def train_and_evaluate_spmd_model(
                 checkpoint_task_dir,
                 checkpoint_type=checkpoint_type,
                 state_specs=partitioned_specs,
-                max_checkpoints=train_p.save_max_to_keep,
                 unreplicate=False)
+          checkpoint_manager.save_metadata(global_step_id=step_i)
           if multi_host_checkpointing:
             py_utils.sync_global_devices(
                 f'checkpointer:saved:{checkpoint_dir}:step-{step_i}')
