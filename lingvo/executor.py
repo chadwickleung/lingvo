@@ -73,7 +73,7 @@ def GetExecutorParams(model_name, cluster_params, model_registry):
     # Confirmed: model_name == lm.synthetic_packed_input.DenseLM8B2x2
     ps_cfg = model_registry.GetProgramSchedule(model_name)
 
-    # get train_cfg, where train_cfg is a p and p.task == what returned by Task()
+    # Confirmed: get train_cfg, where train_cfg is a p and p.task == what returned by Task()
     # Confirmed: train_cfg == model_params & train_cfg.task == what returned by Task() in 
     # lm.synthetic_packed_input.DenseLM8B2x2
     train_cfg = model_registry.GetParams(model_name, 'Train')
@@ -151,7 +151,7 @@ def GetExecutorParams(model_name, cluster_params, model_registry):
 
       program_schedule_params = ps_cfg
 
-      # {'Train', p}, where p.task == what returned by Task()
+      # Confirmed: Creates {'Train', p}, where p.task == what returned by Task()
       program_schedule_params.task_dict = {'Train': train_cfg}
       for eval_dataset_name in program_schedule_params.dataset_names:
         # expected no eval dataset as ProgramSchedule defined empty 
@@ -194,7 +194,7 @@ class ExecutorTpu(base_runner.BaseRunner):
       *args: List args to pass through to BaseRunner.
       **kwargs: keyword args to pass through to BaseRunner.
     """
-    # Set-ed EagerMode == False in trainer.py
+    # Confirmed: Set-ed EagerMode == False in trainer.py
     if py_utils.IsEagerMode():
       assert tf.executing_eagerly()
       tf.logging.info(f'FLAGS.tf_master: {FLAGS.tf_master}')
@@ -205,9 +205,11 @@ class ExecutorTpu(base_runner.BaseRunner):
       tf.config.experimental_connect_to_cluster(resolver)
 
     # Confirmed: Initializes BaseRunner and prints the model params
+    # (starts & ends w/ = * 60)
     super().__init__(train_cfg, *args, **kwargs)
 
     # this is obtained from the cluster's metadata
+    # Chadwick: What is this num_splits_per_client or data_parallelism? Any effect?
     data_parallelism = self._cluster.num_splits_per_client
     assert data_parallelism
     # this is obtained from the cluster's metadata
@@ -226,7 +228,7 @@ class ExecutorTpu(base_runner.BaseRunner):
     # Confirmed: SingelTaskModel
     if issubclass(train_cfg.cls, base_model.SingleTaskModel):
       assert len(ps_params_dict) == 1
-      # This means there's no _model_task_name for SingleTaskModel
+      # Confirmed: This means there's no _model_task_name for SingleTaskModel (don't need a name)
       self._model_task_name = list(ps_params_dict.keys())[0]
       self._single_task_mode = True
     # NOT MultiTaskModel
@@ -265,6 +267,7 @@ class ExecutorTpu(base_runner.BaseRunner):
     def _WaitTillInit(job=None):
       """Wait until the model is ready."""
       try:
+        # Confirmed: Not Eager Mode
         if py_utils.IsEagerMode():
           topology = tf.tpu.experimental.initialize_tpu_system(resolver)
         else:
@@ -310,7 +313,7 @@ class ExecutorTpu(base_runner.BaseRunner):
         tf.logging.info('TPU initialization failed: %s', e)
         raise
 
-    # Already set _ml_perf = _ml_perf_log == False
+    # Confirmed: Already set _ml_perf = _ml_perf_log == False
     if self._ml_perf_log:
       mlp_log.mlperf_print(key='init_start', value=None)
     if len(self._cluster.all_worker_names) > 1:
@@ -319,14 +322,14 @@ class ExecutorTpu(base_runner.BaseRunner):
     else:
       _WaitTillInit(None)
 
-    # Will return None as the model is not a MultiTaskModel
+    # Confirmed: Will return None as the model is not a MultiTaskModel
     shared_model = self._MaybeConstructSharedModel(train_cfg)
 
     self._program_schedule_dict = {}
     self._programs = []
 
-    # only one thing in the dict since it's a SingleTaskModel
-    # task_string == '' and program_schedule_params == what returned by ProgramSchedule()
+    # Confirmed: Only one thing in the dict since it's a SingleTaskModel
+    # task_string == '' and program_schedule_params == what returned by ProgramSchedule() in lm.params
     for task_string, program_schedule_params in ps_params_dict.items():
       program_schedule_params.logdir = self._logdir
       program_schedule_params.num_splits_per_client = data_parallelism
@@ -335,7 +338,7 @@ class ExecutorTpu(base_runner.BaseRunner):
 
       # If the model was created above, we'll inject it here as a shared_model.
       # shared_model == None as it is not a MultiTaskModel
-      # This will instantiate the SimpleProgramScheduleForTask specified in ProgramSchedule()
+      # Confirmed: This will instantiate the SimpleProgramScheduleForTask specified in ProgramSchedule().
       # A SimpleProgramSchedule will be initialized thru hyperparams.py
       tf.logging.info('Instantialte Program Schedule using its params')
       ps = program_schedule_params.Instantiate(
@@ -344,9 +347,10 @@ class ExecutorTpu(base_runner.BaseRunner):
           tf_master=self._tf_master)
       self._program_schedule_dict[task_string] = ps
 
-      # This is the long chunk in log
+      # Confirmed: This is the long chunk in the output log
       tf.logging.info('program_schedule_params: %s',
                       program_schedule_params.ToText())
+      # Confirmed: self._programs should only contain train_programs
       self._programs += ps.Programs()
       if program_schedule_params.ml_perf.benchmark_name is not None:
         self._ml_perf = program_schedule_params.ml_perf

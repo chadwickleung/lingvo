@@ -2656,7 +2656,6 @@ class DenseBuilder(MoEBuilder):
     # multiply the two componentwise.
     p = self.params
     # Chadwick: why does it not need device mesh?
-    # TODO: try assigning device_mesh to the configured device_mesh 
     return self._ShardedVar(
         name=name,
         weights=[('wi_0',
@@ -3267,13 +3266,13 @@ class UniTransformer(base_model.BaseTask):
         ffw_layer = b.DenseReluDenseGated(
             'dense_relu_dense', gated_ffn_activation, decoder=True)
       if p.moe:
-        # Question: What is the difference between MoEGated and MoE?
+        # Chadwick: What is the difference between MoEGated and MoE?
         tf.logging.info('################MoE################')
         if p.moe_gated_gelu:
-          # TODO: Should be using MoEGated now
           tf.logging.info('################MoE gated################')
           moe_layer = b.MoEGated('moe', decoder=True)
         else:
+          # Confirmed: Using MoE not Gated
           tf.logging.info('################MoE not gated################')
           moe_layer = b.MoE('moe', decoder=True)
           tf.logging.info('################Constructed MoE layer################')

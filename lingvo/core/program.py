@@ -1630,8 +1630,8 @@ class SimpleProgramSchedule:
         raise ValueError('could not find train dataset %s in %s' %
                          (p.train_program.dataset_name, p.task_dict))
 
-      # TODO: How is task_dict set
-      # p.train_program is set in SimpleProgramScheduleForTask
+      # Confirmed: p.train_program is set in SimpleProgramScheduleForTask
+      # p.train_program is a TrainProgram instantiatble param
       p.train_program.task = p.task_dict[p.train_program.dataset_name]
       p.train_program.num_splits_per_client = p.num_splits_per_client
 
@@ -1646,6 +1646,10 @@ class SimpleProgramSchedule:
       raise ValueError('When EMA is used, there must be a train program to '
                        'apply the EMA before eval programs can use it.')
 
+    # Chadwick: There should be no eval_programs
+    tf.logging.info('#######################################################')
+    tf.logging.info('#######################################################')
+    tf.logging.info('#######################################################')
     tf.logging.info('p.eval_programs has %d elements', len(p.eval_programs))
     for eval_program_params in p.eval_programs:
       eval_program_params.logdir = p.logdir
@@ -1796,6 +1800,7 @@ def SimpleProgramScheduleForTask(train_dataset_name,
   program_schedule_params = SimpleProgramSchedule.Params()
   
   # Confirmed: _CreateProgramParams returns a train program params 
+  # train_program_cls == TrainProgram class
   program_schedule_params.train_program = _CreateProgramParams(
       train_program_cls, 'train', train_dataset_name, train_steps_per_loop)
 
@@ -1811,6 +1816,7 @@ def SimpleProgramScheduleForTask(train_dataset_name,
                        f'{len(eval_dataset_names)}.')
   else:
     # Confirmed: eval_dataset_names == []
+    # Therefore, eval_steps_per_loop == 0
     eval_steps_per_loop = [eval_steps_per_loop] * len(eval_dataset_names)
   # Confirmed: decode_steps_per_loop == 0
   if isinstance(decode_steps_per_loop, list):
@@ -1823,6 +1829,7 @@ def SimpleProgramScheduleForTask(train_dataset_name,
       raise ValueError('decode_until_out_of_range must be set to True if '
                        'decode_steps_per_loop is not specified (None).')
   else:
+    # Therefore, decode_steps_per_loop == 0
     decode_steps_per_loop = [decode_steps_per_loop] * len(eval_dataset_names)
   if isinstance(postprocess_all_at_once, list):
     if len(postprocess_all_at_once) != len(eval_dataset_names):
@@ -1834,6 +1841,7 @@ def SimpleProgramScheduleForTask(train_dataset_name,
                               ] * len(eval_dataset_names)
 
   # Confirmed: eval_dataset_names == []
+  # Therefore, there are no eval_programs
   for idx, dataset_name in enumerate(eval_dataset_names):
     program_schedule_params.dataset_names.append(dataset_name)
     if eval_steps_per_loop[idx] > 0:
