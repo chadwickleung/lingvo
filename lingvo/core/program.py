@@ -437,6 +437,10 @@ class TrainProgram(BaseProgram):
   """TrainProgram trains a single task and handles checkpoints."""
 
   def __init__(self, params, **kwargs):
+    tf.logging.info('###########################################')
+    tf.logging.info('###########################################')
+    tf.logging.info('###########################################')
+    tf.logging.info('Instantiating TrainProgram')
     super().__init__(params, **kwargs)
     self._step_rate_tracker = summary_utils.StepRateTracker()
     self._program_name = 'TrainProgram'
@@ -554,6 +558,7 @@ class TrainProgram(BaseProgram):
   def BuildTpuSubgraph(self):
     tf.logging.info('TrainProgram BuildTpuSubGraph')
     p = self.params
+    # Confirmed: spmd == True in lm param
     self.spmd = (
         self.params.spmd or
         self._task_params.input.use_partitioned_infeed_queue)
@@ -1632,6 +1637,7 @@ class SimpleProgramSchedule:
 
       # Confirmed: p.train_program is set in SimpleProgramScheduleForTask
       # p.train_program is a TrainProgram instantiatble param
+      # 
       p.train_program.task = p.task_dict[p.train_program.dataset_name]
       p.train_program.num_splits_per_client = p.num_splits_per_client
 
