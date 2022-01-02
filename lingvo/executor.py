@@ -151,7 +151,8 @@ def GetExecutorParams(model_name, cluster_params, model_registry):
 
       program_schedule_params = ps_cfg
 
-      # Confirmed: Creates {'Train', p}, where p.task == what returned by Task()
+      # Confirmed: Creates {'Train', p (param)}, where p.task == what returned by Task()
+      # Set task_dict here; note that ps_params_dict is a dict, and ps_params.task_dict is also a dict
       program_schedule_params.task_dict = {'Train': train_cfg}
       for eval_dataset_name in program_schedule_params.dataset_names:
         # expected no eval dataset as ProgramSchedule defined empty 

@@ -571,7 +571,7 @@ class TrainProgram(BaseProgram):
     with py_utils.OpportunisticVariableReuseScope(True):
       # Confirmed: A SingleTaskModel cls
       self._model = self._InstantiateTaskModel(self._task_params)
-      tf.logging.info('Model class: %s', self._model.cls)
+
     # Confirmed: _task is what returned by Task()
     tf.logging.info('Done initiailizing model')
     self._task = self._model.GetTask()
