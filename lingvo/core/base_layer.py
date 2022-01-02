@@ -1079,15 +1079,16 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
     # tf.logging.info('################Enter CreateChild################')
     if hasattr(self, '_disable_create_child') and self._disable_create_child:
       raise ValueError('Attempting to call CreateChild outside of __init__.')
+    
+    tf.logging.info('Check name')
     self._CheckName(name)
-    # tf.logging.info('Before copy')
-    # tf.logging.info(params)
     p = self.CopyBaseParams(self.params, params.Copy())
-    # tf.logging.info('After copy')
-    # tf.logging.info(p)
     if not p.name:
       p.name = name
+
+    tf.logging.info('Next statement should be Initialize UniTransformer')
     child = p.Instantiate()
+
     self._private_children[name] = child
     # tf.logging.info('################Leave CreateChild################')
 
