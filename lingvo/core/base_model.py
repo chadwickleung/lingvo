@@ -1274,6 +1274,9 @@ class SingleTaskModel(SingleTaskBase):
       raise ValueError('Model EMA settings does not match task.')
 
     super().__init__(p, **kwargs)
+    # Chadwick: We are in SingleTaskModel, its task is what returned by Task(), which should
+    # be a UniTransformer cls
+    tf.logging.info('Calling CreateChild')
     self.CreateChild('_task', self.params.task)
 
   def _child_variable_scope_override(self):
