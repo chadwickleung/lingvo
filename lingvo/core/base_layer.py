@@ -869,11 +869,9 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
       var_params: `Params` used to create the variable.
       **kwargs: Keyword args passed to `.py_utils.CreateVariable`.
     """
-    tf.logging.info(self.params.device_mesh)
-    tf.logging.info(name)
+    # tf.logging.info(self.params.device_mesh)
+    # tf.logging.info(name)
     if self.params.device_mesh is not None:
-      tf.logging.info('################Inspect var_params################')
-      tf.logging.info(var_params)
       if (len([dim for dim in var_params.shape if dim > 1]) > 1 and
           var_params.tensor_split_dims_mapping is None):
         tf.logging.warning(
@@ -1076,21 +1074,17 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
       name: Sub layer name which is used as the key into vars/theta.
       params: `Hyperparams` object to instantiate a layer.
     """
-    # tf.logging.info('################Enter CreateChild################')
     if hasattr(self, '_disable_create_child') and self._disable_create_child:
       raise ValueError('Attempting to call CreateChild outside of __init__.')
-    
-    tf.logging.info('Check name')
     self._CheckName(name)
     p = self.CopyBaseParams(self.params, params.Copy())
     if not p.name:
       p.name = name
 
-    tf.logging.info('Next statement should be Initialize UniTransformer')
+    # Confirmed: For the first time, it initializes UniTransformer since UniTransformer 
+    # is what returned by Task() in lm params
     child = p.Instantiate()
-
     self._private_children[name] = child
-    # tf.logging.info('################Leave CreateChild################')
 
   def CreateChildren(
       self, name: str, params: Union[List[BaseLayerParamsT],

@@ -545,6 +545,8 @@ class TrainProgram(BaseProgram):
           if py_utils.IsEagerMode():
             stack.enter_context(py_utils.GradientTape(persistent=True))
           # Chadwick: Investigating FProp (called from UniTransformer, ComputePredictions)
+          # _model is SingleTaskModel
+          tf.logging.info('Start constructing F and B Graph')
           self._model.ConstructFPropBPropGraph()
       per_step_eval_metrics = self._eval_metrics.SetMetrics(
           self._task.eval_metrics, args)
@@ -569,7 +571,8 @@ class TrainProgram(BaseProgram):
 
     tf.logging.info('Try to instantiate model')
     with py_utils.OpportunisticVariableReuseScope(True):
-      # Confirmed: A SingleTaskModel cls
+      # Confirmed: Instantiates SingleTaskModel
+      # and will also instantiate both UniTransformer and DenseBuilder
       self._model = self._InstantiateTaskModel(self._task_params)
 
     # Confirmed: _task is what returned by Task()
@@ -580,7 +583,7 @@ class TrainProgram(BaseProgram):
     @tpu_function.on_device_training_loop
     def TpuTrainLoop():
       loop_result = tpu_training_loop.repeat(
-          self._steps_per_loop,
+          self._steps_per_loop,  # Chadwick: This looks like the steps_per_loop set in lm params
           self.TpuTrainStep,
           inputs=self._eval_metrics.initial_values,
           name='train_loop')
@@ -610,6 +613,8 @@ class TrainProgram(BaseProgram):
           TpuTrainLoop,
           num_shards=self.data_parallelism,
           device_assignment=py_utils.GetTpuDeviceAssignment())
+
+      # Chadwick: No idea what the following does
       outfeed = self._OutfeedDequeueLoop(self._task.per_example_tensors,
                                          self._steps_per_loop,
                                          self.data_parallelism)

@@ -538,6 +538,7 @@ class BaseTask(base_layer.BaseLayer):
         training example, where the first dimension of each tensor is the batch
         index.
     """
+    tf.logging.info('Calls ComputePredictions')
     predictions = self.ComputePredictions(theta, input_batch)
     return self.ComputeLoss(theta, predictions, input_batch)
 
@@ -569,12 +570,14 @@ class BaseTask(base_layer.BaseLayer):
       with py_utils.GlobalStepContext(self._global_step_var):
         # Always reset step seed at the start of a new global_step.
         py_utils.ResetStepSeed()
+        tf.logging.info('Calls _FPropSplitInputBatch')
         metrics, per_example = self._FPropSplitInputBatch(theta, input_batch)
         self._FPropResult(metrics, per_example)
     return metrics, per_example
 
   def _FPropTpu(self, theta, input_batch):
     with tf.name_scope('tower_0_0'):
+      tf.logging.info('Calls FPropTower')
       metrics, per_example = self.FPropTower(theta, input_batch)
       metrics = py_utils.WeightedAvgOfMetrics([metrics])
     return metrics, per_example
@@ -582,6 +585,7 @@ class BaseTask(base_layer.BaseLayer):
   def _FPropSplitInputBatch(self, theta, input_batch):
     """Splits the input batch on the input device."""
     if py_utils.use_tpu():
+      tf.logging.info('Calls _FPropTpu')
       return self._FPropTpu(theta, input_batch)
 
     num_splits = self.cluster.num_splits_per_client
@@ -658,6 +662,7 @@ class BaseTask(base_layer.BaseLayer):
     """Calls `FProp` with this layer's parameters."""
     if input_batch is None:
       input_batch = self.GetInputBatch()
+    tf.logging.info('Calls FProp')
     return self.FProp(self.theta, input_batch)
 
   def AdjustGradients(self, vars_gradients):
@@ -1210,7 +1215,11 @@ class SingleTaskBase(BaseModel):
       self._task.ApplyExponentialMovingAverage(self.ema)
       self._MakeEMAVariablesDict()
 
+    tf.logging.info('##########################################################')
+    tf.logging.info('Working on %s', self._task)
+    tf.logging.info('Forward Propagation')
     self._task.FPropDefaultTheta()
+    tf.logging.info('Backward Propagation')
     self._task.BProp()
 
   def ConstructFPropGraph(self):
@@ -1274,9 +1283,8 @@ class SingleTaskModel(SingleTaskBase):
       raise ValueError('Model EMA settings does not match task.')
 
     super().__init__(p, **kwargs)
-    # Chadwick: We are in SingleTaskModel, its task is what returned by Task(), which should
-    # be a UniTransformer cls
-    tf.logging.info('Calling CreateChild')
+    # Confirmed: We are in SingleTaskModel, its task is what returned by Task(), which should
+    # be a UniTransformer cls, and CreateChild will instantiate UniTransformer
     self.CreateChild('_task', self.params.task)
 
   def _child_variable_scope_override(self):

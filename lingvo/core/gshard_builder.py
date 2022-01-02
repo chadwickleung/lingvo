@@ -3306,6 +3306,7 @@ class UniTransformer(base_model.BaseTask):
     tf.logging.info('################Creates logits split################')
     logits_split = b.MeshSplit('logits_split', b.params.logits_split)
 
+    # Confirmed: Note that after creating child, it can be accessed thru self.<Child>
     tf.logging.info('################Creates dec child################')
     self.CreateChild('dec', dec)
     tf.logging.info('################Creates emb_w_split child################')
@@ -3340,10 +3341,13 @@ class UniTransformer(base_model.BaseTask):
     Returns:
       A dict containing metrics pairs.
     """
+    tf.logging.info('Using UniTransformer ComputePredictions')
     p = self.params
 
     with tf.name_scope(p.name):
       decoder_input = self._ComputeDecoderInput(theta, input_batch)
+      
+      # Confirmed: self.dec contains all sublayers
       all_outputs = self.dec.FProp(theta.dec, decoder_input)
       dec_outputs, aux_loss = all_outputs.vec, all_outputs.aux_loss
       dec_outputs *= (p.builder.model_dim**-0.5)
