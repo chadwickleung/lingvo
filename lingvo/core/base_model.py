@@ -1258,6 +1258,7 @@ class SingleTaskModel(SingleTaskBase):
   def __init__(self, params, **kwargs):
     assert issubclass(params.cls, SingleTaskModel)
     assert params.task
+    tf.logging.info('Instantiate SingleTaskModel')
     p = params.Copy()  # Make a copy to avoid modifying the input.
     p.name = p.name or p.task.name
     p.task.name = p.task.name or p.name

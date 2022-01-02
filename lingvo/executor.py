@@ -74,8 +74,8 @@ def GetExecutorParams(model_name, cluster_params, model_registry):
     ps_cfg = model_registry.GetProgramSchedule(model_name)
 
     # Confirmed: get train_cfg, where train_cfg is a p and p.task == what returned by Task()
-    # Confirmed: train_cfg == model_params & train_cfg.task == what returned by Task() in 
-    # lm.synthetic_packed_input.DenseLM8B2x2
+    # Confirmed: train_cfg == model_params (NOT what returned by Train()) & train_cfg.task == what 
+    # returned by Task() in lm.synthetic_packed_input.DenseLM8B2x2
     train_cfg = model_registry.GetParams(model_name, 'Train')
     train_cfg.cluster = cluster_params
 
@@ -340,7 +340,8 @@ class ExecutorTpu(base_runner.BaseRunner):
       # shared_model == None as it is not a MultiTaskModel
       # Confirmed: This will instantiate the SimpleProgramScheduleForTask specified in ProgramSchedule().
       # A SimpleProgramSchedule will be initialized thru hyperparams.py
-      tf.logging.info('Instantialte Program Schedule using its params')
+      # Also initializes TrainProgram.
+      tf.logging.info('Instantiate Program Schedule using its params')
       ps = program_schedule_params.Instantiate(
           shared_model=shared_model,
           trial=self._trial,
@@ -351,6 +352,7 @@ class ExecutorTpu(base_runner.BaseRunner):
       tf.logging.info('program_schedule_params: %s',
                       program_schedule_params.ToText())
       # Confirmed: self._programs should only contain train_programs
+      # ps.Programs() returns train_programs that was set in the above instantiation
       self._programs += ps.Programs()
       if program_schedule_params.ml_perf.benchmark_name is not None:
         self._ml_perf = program_schedule_params.ml_perf

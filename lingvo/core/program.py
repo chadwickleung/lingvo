@@ -544,6 +544,7 @@ class TrainProgram(BaseProgram):
         with contextlib.ExitStack() as stack:
           if py_utils.IsEagerMode():
             stack.enter_context(py_utils.GradientTape(persistent=True))
+          # Chadwick: Investigating FProp (called from UniTransformer, ComputePredictions)
           self._model.ConstructFPropBPropGraph()
       per_step_eval_metrics = self._eval_metrics.SetMetrics(
           self._task.eval_metrics, args)
@@ -568,7 +569,11 @@ class TrainProgram(BaseProgram):
 
     tf.logging.info('Try to instantiate model')
     with py_utils.OpportunisticVariableReuseScope(True):
+      # Confirmed: A SingleTaskModel cls
       self._model = self._InstantiateTaskModel(self._task_params)
+      tf.logging.info('Model class: %s', self._model.cls)
+    # Confirmed: _task is what returned by Task()
+    tf.logging.info('Done initiailizing model')
     self._task = self._model.GetTask()
     self._task.input.TpuSetup()
 
@@ -1644,6 +1649,7 @@ class SimpleProgramSchedule:
       # Confirmed: task_name == ''
       p.train_program.task_name = p.task_name
       p.train_program.ml_perf = p.ml_perf.Copy()
+      # Confirmed: Instantiates TrainProgram and thus BaseProgram
       self.train_program = p.train_program.Instantiate(**kwargs)
       self._programs.append(self.train_program)
     elif py_utils.ExponentialMovingAverage():
@@ -1652,11 +1658,7 @@ class SimpleProgramSchedule:
       raise ValueError('When EMA is used, there must be a train program to '
                        'apply the EMA before eval programs can use it.')
 
-    # Chadwick: There should be no eval_programs
-    tf.logging.info('#######################################################')
-    tf.logging.info('#######################################################')
-    tf.logging.info('#######################################################')
-    tf.logging.info('p.eval_programs has %d elements', len(p.eval_programs))
+    # Confirmed: NO eval_programs
     for eval_program_params in p.eval_programs:
       eval_program_params.logdir = p.logdir
       if eval_program_params.dataset_name not in p.task_dict:
