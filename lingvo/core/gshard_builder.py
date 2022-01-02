@@ -250,7 +250,6 @@ class MoEBuilder(builder.Base):
 
   def _AdjustMSplit(self, split, m_dim):
     """Adjusts split annotation according to model_dim_reshape_segments."""
-    tf.logging.info('################Called _AdjustSplit################')
     if split is None:
       return None
     # TO confirm: Adjusted model_dim_reshape_segments in Task()
@@ -601,13 +600,11 @@ class MoEBuilder(builder.Base):
                   spmd_pipeline_stages, spmd_pipeline_microbatches, imap_keys,
                   layer_fn):
     # TODO(yuanzx): Consider refactor this into a layer.
-    tf.logging.info('##############Saw some hints#################')
     assert 'segment_id' in imap_keys
     if use_repeat_layer:
       assert self.params.deterministic_dropout
     stack = []
     for key in imap_keys:
-      tf.logging.info('################Split for %s################', key)
       stack.append(
           ('i.' + key + '->' + key + '_split', self.Split(key + '_split')))
 
