@@ -3345,6 +3345,7 @@ class UniTransformer(base_model.BaseTask):
       decoder_input = self._ComputeDecoderInput(theta, input_batch)
       
       # Confirmed: self.dec contains all sublayers
+      # Chadwick: Investigate self.dec.FProp
       all_outputs = self.dec.FProp(theta.dec, decoder_input)
       dec_outputs, aux_loss = all_outputs.vec, all_outputs.aux_loss
       dec_outputs *= (p.builder.model_dim**-0.5)
