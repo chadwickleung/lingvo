@@ -502,6 +502,7 @@ class RunnerManager:
       runner = self._CreateRunner(j, FLAGS.model_task_name, logdir, tf_master,
                                   trial)
       all_runners.append(runner)
+      tf.logging.info('Number of runner: %d', len(all_runners))
     return all_runners
 
   def StartRunners(self, all_runners):

@@ -678,6 +678,7 @@ class TrainProgram(BaseProgram):
     else:
       infeed_future = self._infeed_pool.apply_async(
           self._InfeedLoop, args=(sess,))
+      # Confirmed: self.tpu_outs == TrainFunc()
       values, outfeeds = sess.run(self.tpu_outs)
       infeed_future.wait()
 

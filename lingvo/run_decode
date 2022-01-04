@@ -1,0 +1,6 @@
+echo Git pulling
+git pull chadwick master
+echo Define cloud bucket
+export LOGDIR=gs://bucket-test-gshard
+echo Run model training
+bazel run -c opt lingvo/tasks/lm/tools:gshard_lm_decode -- --model=lm.synthetic_packed_input.DenseLm8B2x2Decode --checkpoint=${LOGDIR} --input=gshard_input --output=gshard_output --tpu=${TPU_NAME} --print_outputs=True --is_cloud_tpu_node=True

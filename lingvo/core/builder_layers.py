@@ -895,12 +895,11 @@ class GraphLayer(base_layer.BaseLayer):
   def __init__(self, params):
     super().__init__(params)
     p = self.params
-    # tf.logging.info('################')
-    # tf.logging.info('%s', p.ToText())
-    # tf.logging.info('################')
     assert p.name
     assert p.input_endpoints
     self._seq = []
+    tf.logging.info('######################################################')
+    tf.logging.info('Building Graph for %s', p.name)
 
     # If sub_layers exists, we instantiate layers from that param, otherwise
     # we get them from sub. reference_name helps us figure out what the layers
@@ -911,6 +910,7 @@ class GraphLayer(base_layer.BaseLayer):
         if not name:
           name = 'sub_layer_%d' % i
           sub.name = name
+        # Confirmed: Instantiates each sublayer, and can be accessed thru self.<sub>
         self.CreateChild(name, sub)
       reference_name = lambda sub: self.params.sub_layers[sub].name
     else:
@@ -931,11 +931,13 @@ class GraphLayer(base_layer.BaseLayer):
       sig = GraphSignature(signature)
       assert sig.outputs, '{}'.format(signature)
       name = reference_name(sub)
+      # Confirmed: self.children[name] == self.<sub>
       self._seq.append((name, sig, self.children[name]))
 
   def FProp(self, theta, *args):
     p = self.params
 
+    # Chadwick: Investigate what the following (GraphTensors()) does
     graph_tensors = self._fprop = GraphTensors()
     with tf.name_scope(p.name):
       if len(p.input_endpoints) != len(args):
@@ -959,6 +961,7 @@ class GraphLayer(base_layer.BaseLayer):
         tf.logging.vlog(1, 'signature: %s', p.sub[i][0])
         tf.logging.vlog(1, 'GraphLayer: call %s %s %d %s', ch.params.name, ch,
                         len(input_args), str(input_args))
+        # Confirmed: ch.FProp is calling the sublayer's FProp method
         ch_out = ch.FProp(th, *input_args)
         if len(sig.outputs) == 1:
           ch_out = (ch_out,)

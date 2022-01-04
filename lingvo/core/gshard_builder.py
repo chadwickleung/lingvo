@@ -571,6 +571,9 @@ class MoEBuilder(builder.Base):
 
     tf.logging.info('################Called this DecoderLayerStack################')
     def _DecoderLayer(n, p):
+      # Confirmed: self.DecoderLayer computes graph of decoder layer
+      tf.logging.info('########################################################')
+      tf.logging.info('Computing layer for %s', n)
       return self.DecoderLayer(
           n,
           p,
@@ -578,6 +581,7 @@ class MoEBuilder(builder.Base):
           norm_type=norm_type,
           norm_policy=norm_policy)
 
+    # Confirmed: self._LayerStack returns a Graph
     return self._LayerStack(name, sub_layers, num, use_repeat_layer,
                             spmd_pipeline_stages, spmd_pipeline_microbatches,
                             self._DecoderLayerInMapKeys, _DecoderLayer)
@@ -631,6 +635,7 @@ class MoEBuilder(builder.Base):
     layers_per_stage = num // spmd_pipeline_stages
     main_stack = []
     if use_repeat_layer:
+      tf.logging.info('Uses repeat layer')
       blocks = []
       for l in sub_layers:
         blocks += _SubLayersBlock(l, i)
@@ -648,6 +653,7 @@ class MoEBuilder(builder.Base):
            repeat_p)
       ]
     else:
+      tf.logging.info('Does not use repeat layer')
       for _ in range(layers_per_stage):
         for l in sub_layers:
           # x_i, loss_i => x_{i+1}, loss_{i+1}
@@ -3305,6 +3311,7 @@ class UniTransformer(base_model.BaseTask):
 
     # Confirmed: Note that after creating child, it can be accessed thru self.<Child>
     tf.logging.info('################Creates dec child################')
+    # Confirmed: The following calls GraphLayer's init method
     self.CreateChild('dec', dec)
     tf.logging.info('################Creates emb_w_split child################')
     self.CreateChild('emb_w_split', emb_w_split)

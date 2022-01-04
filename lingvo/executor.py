@@ -496,6 +496,7 @@ class ExecutorTpu(base_runner.BaseRunner):
         config_proto = (
             self._tpu_embedding.config_proto
             if self._tpu_embedding is not None else None)
+        # Chadwick: Should log here to capture each sess runtime
         for worker in self._cluster.all_worker_names:
           sess.run(
               tf.tpu.initialize_system(
