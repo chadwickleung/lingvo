@@ -44,6 +44,8 @@ from lingvo import model_registry
 from lingvo.core import gshard_decode
 import numpy as np
 
+import wandb
+
 FLAGS = tf.flags.FLAGS
 
 tf.flags.DEFINE_string('model', '', 'Registered model name')
@@ -449,6 +451,9 @@ def main(unused_argv):
   override_flags()
   if FLAGS.disable_logging:
     tf.get_logger().setLevel('CRITICAL')
+
+  wandb.init(project="gshard-logging", entity="gshard-decode", config=FLAGS, mode="disabled")
+
 
   model_params = model_registry.GetParams(FLAGS.model, None)
   tf.logging.info('Found model %s', FLAGS.model)
