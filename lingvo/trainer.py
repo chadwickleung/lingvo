@@ -520,6 +520,8 @@ class RunnerManager:
     if len(all_runners) == 1 and not all_runners[0].enqueue_ops:
       # If there is only one runner and it does not have an enqueue thread, just
       # run it directly here.
+      tf.logging.info('Only one runner')
+      # Confirmed: The following calls ExecutorTpu's Start method
       all_runners[0].Start()
     else:
       threads = []

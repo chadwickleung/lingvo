@@ -676,6 +676,7 @@ class TrainProgram(BaseProgram):
       values = py_utils.Transform(lambda x: x.numpy(), values)
       outfeeds = py_utils.Transform(lambda x: x.numpy(), outfeeds)
     else:
+      tf.logging.info('Start infeed loop')
       infeed_future = self._infeed_pool.apply_async(
           self._InfeedLoop, args=(sess,))
       # Confirmed: self.tpu_outs == TrainFunc()
@@ -1695,6 +1696,7 @@ class SimpleProgramSchedule:
 
   def Run(self, sess=None, threadpool=None):
     """Execute the program schedule."""
+    tf.logging.info('Running Program Schedule')
     if self._ml_perf:
       if not self._ml_perf_run_start:
         mlp_log.mlperf_print(key='init_stop', value=None)

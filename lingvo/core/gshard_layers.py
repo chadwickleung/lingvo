@@ -111,7 +111,6 @@ def ShardedWeightParams(shape,
                         collections=None,
                         tensor_split_dims_mapping=None):
   """Returns a hyperparams for a weight variable with optional XLA sharding."""
-  tf.logging.info('################Returns hyperparams################')
   p = py_utils.WeightParams(
       shape,
       init,

@@ -119,7 +119,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             attention_combine_dims=True,
             moe_hidden_dim = self.MOE_HIDDEN_DIM,
             e_dim = self.NUM_DEVICES_PER_SPLIT if self.MOE else None,  # number of experts
-            c_dim = expert_capacity if self.MOE else None), # expert capacity
+            c_dim = 0 if self.MOE else None), # Chadwick: Required us to set it to 0
 
         batch_size=batch_size_per_tf_replica,
         sequence_length=self.SEQUENCE_LENGTH,
@@ -175,7 +175,7 @@ class DenseLm8B2x2(DenseLmTemplate):
   SEQUENCE_LENGTH = 1024
   NUM_DEVICES_PER_SPLIT = 8  # it was 128 
   BATCH_DIM_PER_DEVICE = 0.5  # it was 0.125
-  NUM_TRANSFORMER_LAYERS = 4  # 4 blocks of [DecSelfAttention, DenseReluDense]
+  NUM_TRANSFORMER_LAYERS = 4  # 2 blocks of [[DecSelfAttention, MoE], [DecSelfAttention, DenseReluDense]]
   DEVICE_MESH_SHAPE = [1, 8]
   DEVICE_MESH = np.arange(8).reshape(DEVICE_MESH_SHAPE)
 

@@ -621,6 +621,7 @@ class MoEBuilder(builder.Base):
     def _SubLayersBlock(l, idx):
       map_inputs = 'x_%03d,' + ','.join(
           [key + '_split' for key in imap_keys[1:]])
+      # layer_fn is given in DecoderLayerStack
       return [((map_inputs + '->imap_%03d') % (idx, idx),
                self._CreateNestedMap(name='imap_%03d' % idx, keys=imap_keys)),
               ('imap_%03d->omap_%03d' % (idx, idx),
@@ -634,6 +635,8 @@ class MoEBuilder(builder.Base):
     assert num % spmd_pipeline_stages == 0
     layers_per_stage = num // spmd_pipeline_stages
     main_stack = []
+    
+    # Confirmed: use_repeat_layer == False
     if use_repeat_layer:
       tf.logging.info('Uses repeat layer')
       blocks = []
@@ -653,7 +656,7 @@ class MoEBuilder(builder.Base):
            repeat_p)
       ]
     else:
-      tf.logging.info('Does not use repeat layer')
+      # tf.logging.info('Does not use repeat layer')
       for _ in range(layers_per_stage):
         for l in sub_layers:
           # x_i, loss_i => x_{i+1}, loss_{i+1}
@@ -811,6 +814,9 @@ class MoEBuilder(builder.Base):
     # Gated GELU.  There are two separate linear transformations applied in
     # parallel to the inputs.  You take the gelu of one of them and then
     # multiply the two componentwise.
+
+    # Chadwick: Test if tf.logging would work (guess: won't work)
+    tf.logging.info('Calculating Dense Relu Dense Weights')
     return self._ShardedVar(
         name=name,
         weights=[('wi_0',
@@ -3256,7 +3262,7 @@ class UniTransformer(base_model.BaseTask):
         atten_layer = b.DecMultiDconvHeadAttentionRelativeBias(
             'multi_dconv_head_att')
       else:
-        # Chadwick: Confirmed: Uses DecSelfAttentionRelativeBias
+        # Confirmed: Uses DecSelfAttentionRelativeBias
         tf.logging.info('################dec self attention################')
         atten_layer = b.DecSelfAttentionRelativeBias('dec_self_attention')
       if gated_ffn_activation is None:
@@ -3311,7 +3317,8 @@ class UniTransformer(base_model.BaseTask):
 
     # Confirmed: Note that after creating child, it can be accessed thru self.<Child>
     tf.logging.info('################Creates dec child################')
-    # Confirmed: The following calls GraphLayer's init method
+    # Confirmed: The following calls GraphLayer's init method (what returned by 
+    # DecoderLayerStack)
     self.CreateChild('dec', dec)
     tf.logging.info('################Creates emb_w_split child################')
     self.CreateChild('emb_w_split', emb_w_split)
@@ -3354,6 +3361,9 @@ class UniTransformer(base_model.BaseTask):
       # Confirmed: self.dec contains all sublayers
       # Chadwick: Investigate self.dec.FProp
       all_outputs = self.dec.FProp(theta.dec, decoder_input)
+      
+      tf.logging.info('Called decoder FProp')
+
       dec_outputs, aux_loss = all_outputs.vec, all_outputs.aux_loss
       dec_outputs *= (p.builder.model_dim**-0.5)
       dec_outputs = self.dec_out_split.FProp(theta.dec_out_split, dec_outputs)

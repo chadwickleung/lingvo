@@ -562,6 +562,7 @@ class ExecutorTpu(base_runner.BaseRunner):
 
         # If a task is explicitly selected, only run the programs associated
         # with that task.
+        # Confirmed: IS self._single_task_mode
         if self._single_task_mode or self._model_task_name:
           tf.logging.info('Single task mode: %s', self._model_task_name)
           program_schedule = self._program_schedule_dict[self._model_task_name]
@@ -570,9 +571,10 @@ class ExecutorTpu(base_runner.BaseRunner):
           model_task = self.task_scheduler.Sample(global_step)
           tf.logging.info('Sampled %s', model_task)
           program_schedule = self._program_schedule_dict[model_task]
-
+        # Confirmed: The following calls SimpleProgramSchedule.Run, which calls TrainProgram.Run
         done, train_time_in_secs, eval_time_in_secs = program_schedule.Run(
             sess, program_threadpool)
+        tf.logging.info('Program schedule done running')
 
         executor_cycle_in_secs = time.time() - cycle_start_time
         self._ExportMetrics(

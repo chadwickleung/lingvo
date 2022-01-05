@@ -375,6 +375,7 @@ class BaseRunner:
     """
     try:
       tf.logging.info('%s started.', job_name)
+      # Confirmed: loop_func is _Loop in executor.py
       loop_func(*loop_args)
       tf.logging.info('%s done.', job_name)
 
