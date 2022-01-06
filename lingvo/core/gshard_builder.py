@@ -815,7 +815,7 @@ class MoEBuilder(builder.Base):
     # parallel to the inputs.  You take the gelu of one of them and then
     # multiply the two componentwise.
 
-    # Chadwick: Test if tf.logging would work (guess: won't work)
+    # Chadwick: Test if tf.logging would work (Confirmed: won't work)
     tf.logging.info('Calculating Dense Relu Dense Weights')
     return self._ShardedVar(
         name=name,
@@ -3359,7 +3359,7 @@ class UniTransformer(base_model.BaseTask):
       decoder_input = self._ComputeDecoderInput(theta, input_batch)
       
       # Confirmed: self.dec contains all sublayers
-      # Chadwick: Investigate self.dec.FProp
+      # It calls GraphLayer's FProp method
       all_outputs = self.dec.FProp(theta.dec, decoder_input)
       
       tf.logging.info('Called decoder FProp')
