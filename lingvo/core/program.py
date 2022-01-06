@@ -253,6 +253,7 @@ class BaseProgram:
       for i in range(self._steps_per_loop):
         tf.logging.vlog(1, '_InfeedLoop %d', i)
         tf.logging.info('_InfeedLoop %d', i)
+        tf.logging.info(self._task.input.tpu_infeed_op)
         sess.run(self._task.input.tpu_infeed_op)
       self._WriteInputDataStats(sess)
       tf.logging.info('_InfeedLoop done')
@@ -684,7 +685,9 @@ class TrainProgram(BaseProgram):
       infeed_future = self._infeed_pool.apply_async(
           self._InfeedLoop, args=(sess,))
       # Confirmed: self.tpu_outs == TrainFunc()
+      # Chadwick: I believe that this is where the main Graph gets run
       tf.logging.info('Run Tpu_outs')
+      tf.logging.info(self.tpu_outs)
       values, outfeeds = sess.run(self.tpu_outs)
       infeed_future.wait()
 
