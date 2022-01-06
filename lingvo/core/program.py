@@ -252,6 +252,7 @@ class BaseProgram:
     try:
       for i in range(self._steps_per_loop):
         tf.logging.vlog(1, '_InfeedLoop %d', i)
+        tf.logging.info('_InfeedLoop %d', i)
         sess.run(self._task.input.tpu_infeed_op)
       self._WriteInputDataStats(sess)
       tf.logging.info('_InfeedLoop done')
@@ -438,8 +439,6 @@ class TrainProgram(BaseProgram):
 
   def __init__(self, params, **kwargs):
     tf.logging.info('###########################################')
-    tf.logging.info('###########################################')
-    tf.logging.info('###########################################')
     tf.logging.info('Instantiating TrainProgram')
     super().__init__(params, **kwargs)
     self._step_rate_tracker = summary_utils.StepRateTracker()
@@ -544,7 +543,7 @@ class TrainProgram(BaseProgram):
         with contextlib.ExitStack() as stack:
           if py_utils.IsEagerMode():
             stack.enter_context(py_utils.GradientTape(persistent=True))
-          # Chadwick: Investigating FProp (called from UniTransformer, ComputePredictions)
+          # Confirmed FProp (called from UniTransformer, ComputePredictions)
           # _model is SingleTaskModel
           tf.logging.info('Start constructing F and B Graph')
           self._model.ConstructFPropBPropGraph()
@@ -655,14 +654,19 @@ class TrainProgram(BaseProgram):
 
   def Run(self, sess=None):
     # Prevent overtraining.
+    tf.logging.info('Running TrainProgram')
     if py_utils.IsEagerMode():
       task_global_step = self._task.global_step.numpy()
     else:
+      # Chadwick: Investigate what means by global step, is it the whole model?
+      tf.logging.info('Sess run for task global step')
       task_global_step = sess.run(self._task.global_step)
+      tf.logging.info('Done Sess run for global step')
     if self._ShouldStop(task_global_step):
       return True
 
     if self._ml_perf:
+      tf.logging.info('self._ml_perf is True')
       mlp_log.mlperf_print(
           'block_start',
           None,
@@ -680,6 +684,7 @@ class TrainProgram(BaseProgram):
       infeed_future = self._infeed_pool.apply_async(
           self._InfeedLoop, args=(sess,))
       # Confirmed: self.tpu_outs == TrainFunc()
+      tf.logging.info('Run Tpu_outs')
       values, outfeeds = sess.run(self.tpu_outs)
       infeed_future.wait()
 

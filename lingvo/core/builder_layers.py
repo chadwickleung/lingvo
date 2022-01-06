@@ -936,7 +936,7 @@ class GraphLayer(base_layer.BaseLayer):
 
   def FProp(self, theta, *args):
     p = self.params
-
+    tf.logging.info('Graph Layer FProp called')
     # Chadwick: Investigate what the following (GraphTensors()) does
     graph_tensors = self._fprop = GraphTensors()
     with tf.name_scope(p.name):

@@ -489,6 +489,7 @@ class ExecutorTpu(base_runner.BaseRunner):
       if py_utils.IsEagerMode():
         sess = None
       else:
+        # Chadwick: This sess is very important
         sess = self._GetSession(
             disable_meta_optimizer=FLAGS.disable_meta_optimizer_in_executor)
         stack.enter_context(sess)
@@ -572,6 +573,7 @@ class ExecutorTpu(base_runner.BaseRunner):
           tf.logging.info('Sampled %s', model_task)
           program_schedule = self._program_schedule_dict[model_task]
         # Confirmed: The following calls SimpleProgramSchedule.Run, which calls TrainProgram.Run
+        # Chadwick: Investigating this 1/5 15:13
         done, train_time_in_secs, eval_time_in_secs = program_schedule.Run(
             sess, program_threadpool)
         tf.logging.info('Program schedule done running')
