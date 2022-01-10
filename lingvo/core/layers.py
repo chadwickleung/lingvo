@@ -1686,7 +1686,6 @@ class StackingOverTime(base_layer.BaseLayer):
     assert p.right_context >= 0, p.right_context
     assert p.stride >= 1
     assert p.padding_reduce_option in ('reduce_min', 'reduce_max')
-    self.SetVariableFree()
 
   @classmethod
   def WindowSize(cls, p):
@@ -5174,10 +5173,7 @@ class GatedAverageLayer(base_layer.BaseLayer):
 
     # Weight matrix for scalar gates
     gm_pc = py_utils.WeightParams(
-        shape=[in_size, p.num_inputs],
-        init=p.params_init,
-        dtype=p.dtype,
-        collections=self._VariableCollections())
+        shape=[in_size, p.num_inputs], init=p.params_init, dtype=p.dtype)
     self.CreateVariable('gm', gm_pc)
 
   def FProp(self, theta, inputs):
@@ -5241,8 +5237,7 @@ class LHUCLayer(base_layer.BaseLayer):
     pc = py_utils.WeightParams(
         shape=[p.input_dim],
         init=py_utils.WeightInit.Constant(0.0),
-        dtype=p.dtype,
-        collections=self._VariableCollections())
+        dtype=p.dtype)
     self.CreateVariable('w', pc)
 
   def FProp(self, theta, inp):
@@ -6054,10 +6049,6 @@ class MaskedLmDataAugmenter(base_layer.BaseLayer):
         'will decrease to total_replacement_prob * min_replace_prob_ratio '
         'at step mlm_duration.')
     return p
-
-  def __init__(self, params):
-    super().__init__(params)
-    self.SetVariableFree()
 
   def FProp(self, theta, inputs, paddings=None):
     """Applies data augmentation by randomly mask/replace tokens in inputs.

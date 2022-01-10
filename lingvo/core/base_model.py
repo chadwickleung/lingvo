@@ -357,20 +357,19 @@ class BaseTask(base_layer.BaseLayer):
       with tf.name_scope(None), tf.variable_scope(
           py_utils.GetGlobalVariableScope()):
         var_name = p.name + '_global_step'
-        # Create the variable immediately.
-        self._CreateVariableInternal(
+        self.CreateVariable(
             var_name,
-            base_layer.CreateVariableMeta(
-                var_params=py_utils.WeightParams(
-                    [], py_utils.WeightInit.Constant(0), tf.int64),
-                kwargs=dict(
-                    trainable=False,
-                    collections=[tf.GraphKeys.GLOBAL_VARIABLES])))
+            var_params=py_utils.WeightParams([],
+                                             py_utils.WeightInit.Constant(0),
+                                             tf.int64),
+            trainable=False,
+            collections=[tf.GraphKeys.GLOBAL_VARIABLES])
         summary_utils.scalar(var_name, self._private_vars[var_name])
         self._global_step_var = self._private_vars[var_name]
     else:
       self._global_step_var = py_utils.GetOrCreateGlobalStepVar()
 
+<<<<<<< HEAD
     if p.input:
       # TODO(zhifengc): Consider a simpler way to ensure the input
       # generator stops after one epoch.
@@ -412,9 +411,70 @@ class BaseTask(base_layer.BaseLayer):
 
       tf.logging.info('input_params: %s', input_params)
       self.CreateChild('input', input_params)
+=======
+    with py_utils.GlobalStepContext(self._global_step_var):
+      if p.input:
+        # TODO(zhifengc): Consider a simpler way to ensure the input
+        # generator stops after one epoch.
+        if self.do_eval and p.eval:
+          seq_inp = issubclass(p.input.cls,
+                               base_input_generator.BaseInputGeneratorFromFiles)
+          if p.input.num_samples > 0:
+            if (p.eval.samples_per_summary
+                == 0) or (p.input.num_samples < p.eval.samples_per_summary):
+              p.eval.samples_per_summary = p.input.num_samples
+              # If we know the dataset size and we want to evaluate the full
+              # set, we need to coordinate the input generator to flush out
+              # all samples so the evaler and decoder compute metrics on the
+              # whole set for each summary step.
+              if seq_inp:
+                p.input.flush_every_n = p.input.num_samples
+            if p.eval.decoder_samples_per_summary is not None and (
+                p.eval.decoder_samples_per_summary > p.input.num_samples):
+              p.eval.decoder_samples_per_summary = p.input.num_samples
+          if p.input.eval_samples_per_summary is not None:
+            p.eval.samples_per_summary = p.input.eval_samples_per_summary
+          if p.input.decoder_samples_per_summary is not None:
+            p.eval.decoder_samples_per_summary = (
+                p.input.decoder_samples_per_summary)
+          if p.input.num_samples == 0 and not p.input.resettable:
+            # Dataset size is unknown. Computes eval summary based on
+            # num_samples.
+            # We require static dataset size for non-resettable inputs.
+            # Ignore if the dataset is repeated.
+            repeated = (
+                getattr(p.input, 'repeat_steps', None) or
+                getattr(p.input, 'repeat_with_sentinel', False))
+            if not repeated:
+              assert p.eval.samples_per_summary > 0
+          if seq_inp and p.input.num_batcher_threads > 1:
+            tf.logging.warning(
+                'input.num_batcher_threads > 1 inside eval mode.  '
+                'The input generator may not iterate over exactly '
+                'one epoch per run')
+        input_params = input_policy.Apply(p.input)
+        tf.logging.info('input_params: %s', input_params)
+        self.CreateChild('input', input_params)
 
-    tp = p.train
+      tp = p.train
 
+      # p.train can be None if this task is the teacher/student task in a
+      # DistillationTask.
+      if tp:
+        self._SetLearnerFromLegacyParams(tp)
+        if tp.learner is not None:
+          if isinstance(tp.learner, (list, tuple)):
+            self.CreateChildren('learners', tp.learner)
+          else:
+            self.CreateChildren('learners', [tp.learner])
+      self._UpdateVnConfig()
+>>>>>>> 04b8b865f057fda336993fc386554654d4c2f850
+
+      if (tp and tp.pruning_hparams_dict and
+          pruning_utils.UsePruningInterface(tp.pruning_hparams_dict)):
+        pruning_utils.PruningOp.Setup(tp.pruning_hparams_dict, self.global_step)
+
+<<<<<<< HEAD
     # p.train can be None if this task is the teacher/student task in a
     # DistillationTask.
 
@@ -435,6 +495,11 @@ class BaseTask(base_layer.BaseLayer):
   def InstantiateVariables(self):
     with py_utils.GlobalStepContext(self._global_step_var):
       super().InstantiateVariables()
+=======
+    # The set of ids of TF graphs in which ApplyExponentialMovingAverage has
+    # been called.
+    self._graphs_applied_ema = set()
+>>>>>>> 04b8b865f057fda336993fc386554654d4c2f850
 
   def _SetLearnerFromLegacyParams(self, tp):
     """Sets tp.learner based on legacy params."""
@@ -794,7 +859,27 @@ class BaseTask(base_layer.BaseLayer):
 
   def ApplyExponentialMovingAverage(self, ema):
     """Wraps `self.train_op` with an op updating exponential moving average."""
-    # TODO(rpang): raise an exception if this is called in the eval mode.
+    if not ema:
+      # EMA not enabled.
+      return
+
+    # Make sure this is called at most once in a graph. In eager mode, the outer
+    # tf.function will be traced multiple times in different function graphs.
+    graph = id(tf.get_default_graph())
+    if graph in self._graphs_applied_ema:
+      raise ValueError(
+          'ApplyExponentialMovingAverage was called before. Calling it again '
+          'will create multiple sets of EMA update ops, and the behavior is '
+          'undefined.')
+    self._graphs_applied_ema.add(graph)
+
+    # If self.vars are already EMA variables loaded from checkpoint, we don't
+    # apply EMA again. This happens when we run CPU-based Evaler/Decoder or
+    # export inference graph with EMA enabled.
+    if self.params.is_inference or (self.do_eval and not py_utils.use_tpu()):
+      return
+
+    tf.logging.info('ApplyExponentialMovingAverage on %s', self)
     all_vars = _VariablesForEMA(self.params, self.vars.Flatten())
     with tf.name_scope('moving_average'):
       self._post_train_ops.append(ema.apply(all_vars))
@@ -1081,7 +1166,7 @@ class BaseModel(base_layer.BaseLayer):
               'Checkpointing asynchronously. Currently only support executor.')
     return p
 
-  def __init__(self, params):
+  def __init__(self, params, executor_ema=None):
     """Initializes this Model."""
     assert issubclass(params.cls, BaseModel)
     super().__init__(params)
@@ -1092,23 +1177,20 @@ class BaseModel(base_layer.BaseLayer):
     tp = self.params.train
     if tp.ema_decay > 0:
       assert tp.ema_decay < 1.0
-      # Use the global EMA if set (for executor training).
-      self._ema = py_utils.ExponentialMovingAverage()
-      if not self._ema:
-        self._ema = tf.train.ExponentialMovingAverage(
-            decay=tp.ema_decay, num_updates=self.global_step)
+      assert self.cluster.is_executor_tpu == (executor_ema is not None)
+      if executor_ema is not None:
+        # Use the EMA for executor training if set.
+        self._ema = executor_ema
+      else:
+        self._ema = py_utils.CreateEMAForModel(self.params, self.global_step)
     else:
-      assert not py_utils.ExponentialMovingAverage()
+      assert not executor_ema
       self._ema = None
     self._ema_variables_dict = {}
 
   @property
   def global_step(self):
     return self._global_step_var
-
-  @property
-  def ema(self):
-    return self._ema
 
   @property
   def variables_for_ema(self):
@@ -1127,6 +1209,9 @@ class BaseModel(base_layer.BaseLayer):
     raise NotImplementedError('Abstract method')
 
   def ConstructFPropGraph(self):
+    raise NotImplementedError('Abstract method')
+
+  def ConstructDecodeGraph(self):
     raise NotImplementedError('Abstract method')
 
   def ConstructPostTrainingLoop(self, outfeed=None):
@@ -1194,6 +1279,9 @@ class SingleTaskBase(BaseModel):
   Subclasses must create a Task in self._task by the end of __init__.
   """
 
+  def __init__(self, params, **kwargs):
+    super().__init__(params, **kwargs)
+
   @property
   def tasks(self):
     return [self._task]
@@ -1207,19 +1295,33 @@ class SingleTaskBase(BaseModel):
 
   def ConstructFPropBPropGraph(self):
     if self.ema:
-      tf.logging.info('ApplyExponentialMovingAverage on %s', self._task)
       self._task.ApplyExponentialMovingAverage(self.ema)
       self._MakeEMAVariablesDict()
+<<<<<<< HEAD
 
     tf.logging.info('##########################################################')
     tf.logging.info('Working on %s', self._task)
     tf.logging.info('Forward Propagation')
+=======
+>>>>>>> 04b8b865f057fda336993fc386554654d4c2f850
     self._task.FPropDefaultTheta()
     tf.logging.info('Backward Propagation')
     self._task.BProp()
 
   def ConstructFPropGraph(self):
+    if self.ema:
+      self._task.ApplyExponentialMovingAverage(self.ema)
     self._task.FPropDefaultTheta()
+
+  def ConstructDecodeGraph(self, task_name=None):
+    if self.ema:
+      self._task.ApplyExponentialMovingAverage(self.ema)
+    with py_utils.TaskCallScope(self._task):
+      input_batch = self._task.GetInputBatch()
+      if isinstance(input_batch, list):  # Non-TPU case.
+        assert len(input_batch) == 1
+        input_batch = input_batch[0]
+      return input_batch, self._task.Decode(input_batch)
 
   def ConstructPostTrainingLoop(self, outfeed=None):
     self._task.PostTrainingLoop(outfeed)
@@ -1308,6 +1410,10 @@ class MultiTaskSubModel(SingleTaskBase):
     p = self.params
     self._model = shared_model
     self._task = self._model.children.Get(p.task_name)
+    # TODO(laigd): EMA for MultiTaskSubModel is likely broken, investigate and
+    # fix it.
+    if self._ema:
+      raise ValueError('EMA for MultiTaskSubModel is not supported.')
 
 
 class MultiTaskModel(BaseModel):
@@ -1447,4 +1553,20 @@ class MultiTaskModel(BaseModel):
     for task_name in self.task_names:
       with tf.name_scope(task_name):
         task = self.GetTask(task_name)
+        # Note: this is for CPU-based eval only where the variables are already
+        # loaded as EMA variables, so we don't need to apply EMA.
         task.FPropDefaultTheta()
+
+  def ConstructDecodeGraph(self, task_name=None):
+    if not task_name:
+      raise ValueError(
+          'It can decode only one task at a time, but task_name is not set.')
+    with tf.name_scope(task_name):
+      task = self.GetTask(task_name)
+      # Note: this is for CPU-based eval only where the variables are already
+      # loaded as EMA variables, so we don't need to apply EMA.
+      input_batch = task.GetInputBatch()
+      if isinstance(input_batch, list):
+        assert len(input_batch) == 1  # Non-TPU case.
+        input_batch = input_batch[0]
+      return input_batch, self._task.Decode(input_batch)

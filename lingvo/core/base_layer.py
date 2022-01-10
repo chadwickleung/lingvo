@@ -16,10 +16,8 @@
 """Base class for all layers."""
 
 import abc
-import collections
 import contextlib
 import copy
-import enum
 import itertools
 import re
 from typing import List, Mapping, Optional, Sequence, Type, TypeVar, Union
@@ -126,7 +124,17 @@ def _BaseLayerInitWrapper(func):  # pylint: disable=invalid-name
       stack.append(self)
       try:
         # Calls the layer's real __init__ method.
-        func(self, *args, **kwargs)
+        # pylint: disable=protected-access
+        with contextlib.ExitStack() as context_stack2:
+          if args and IsLayerParams(args[0]):
+            context_stack2.enter_context(
+                self._SelfVariableScope(args[0], enter_name_scope=False))
+          func(self, *args, **kwargs)
+          self._CreateLayerVariables()
+        self._disable_create_child = True
+        self._VerifyChildren()
+        self._VerifyVarsAndTheta()
+        # pylint: enable=protected-access
         if len(stack) > 1:
           # Records the fact stack[-2] just created a sub-layer self.
           stack[-2]._AutoAddChild(self)  # pylint: disable=protected-access
@@ -144,7 +152,7 @@ def RecursiveFindLayerParams(params):
   if not isinstance(params, hyperparams.Params):
     return []
   layer_params = []
-  if hasattr(params, 'cls') and issubclass(params.cls, BaseLayer):
+  if IsLayerParams(params):
     layer_params.append(params)
   for _, p in params.IterParams():
     if isinstance(p, (list, tuple)):
@@ -177,6 +185,7 @@ class BaseLayerMeta(type):
     return cls
   # pylint: enable=bad-mcs-classmethod-argument
 
+<<<<<<< HEAD
   def __call__(cls, *args, **kwargs):
     # tf.logging.info('################Trying to create child################')
     self = super().__call__(*args, **kwargs)
@@ -189,22 +198,11 @@ class BaseLayerMeta(type):
     # pylint: enable=protected-access
     return self
 
+=======
+>>>>>>> 04b8b865f057fda336993fc386554654d4c2f850
 
 class ABCLayerMeta(BaseLayerMeta, abc.ABCMeta):
   pass
-
-
-# NamedTuple that records the metadata for creating a variable.
-# For internal use only. Subclasses of BaseLayer should use
-# self.CreateVariable() to create variables.
-CreateVariableMeta = collections.namedtuple('CreateVariableMeta',
-                                            ['var_params', 'kwargs'])
-
-
-class _CreateLayerVariablesStatus(enum.Enum):
-  NOT_CALLED = 1
-  IN_PROGRESS = 2
-  PER_SPLIT_COMPLETED = 4
 
 
 LAYER_WT = 'layer_weight_variable'
@@ -401,30 +399,6 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
     # symbolic expressions, one for each dimension of the variable.
     self._var_symbolic_shape_map = {}
 
-    self._is_variable_free = False
-    self._variables_to_create = py_utils.NestedMap()
-    self._create_variables_status = _CreateLayerVariablesStatus.NOT_CALLED
-    # Keep track of the tf.variable_scope(p.name) this layer creates so we can
-    # reenter it without creating a new one.
-    self._self_variable_scope = None
-
-  def SetVariableFree(self, value: bool = True) -> None:
-    """Marks this layer as having no variables.
-
-    Note that this status affects sublayers and child layers too.
-
-    Args:
-      value: True to set layer as variable free.
-    """
-    if self._create_variables_status != _CreateLayerVariablesStatus.NOT_CALLED:
-      raise ValueError(
-          'Variable free status for %s must be set before InstantiateVariables().'
-          % self.params.cls)
-    if self._variables_to_create:
-      raise ValueError('Cannot set layer %s with variables as variable free.' %
-                       self.params.cls)
-    self._is_variable_free = value
-
   def FPropDefaultTheta(self, *args, **kwargs):
     """Calls `FProp`."""
     return self.FProp(self.theta, *args, **kwargs)
@@ -454,8 +428,8 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
         return a2
 
     Args:
-      theta: A `.NestedMap` object containing weights' values of this
-        layer and its children layers.
+      theta: A `.NestedMap` object containing weights' values of this layer and
+        its children layers.
       *args: List args.
       **kwargs: Keyward args.
     """
@@ -606,14 +580,27 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
     return sub
 
   @property
+  def ema(self):
+    """Returns the EMA object used by the model that contains this layer."""
+    # Note: if 'self' is not instantiated inside a model or is instantiated
+    # inside an EMA-disabled sub-model created by the main model, None will be
+    # returned.
+    root = self
+    while root.parent:
+      root = root.parent
+    # pylint: disable=protected-access
+    # Note: 'root' may not be a BaseModel, but we want it to be. So to avoid
+    # misuse, we intentionally don't add an '_ema' member for the layer.
+    if hasattr(root, '_ema') and root._ema:
+      assert isinstance(root._ema, tf.train.ExponentialMovingAverage)
+      return root._ema
+    else:
+      return None
+    # pylint: enable=protected-access
+
+  @property
   def vars(self):
     """Returns variables of this layer and its children in a `.NestedMap`."""
-    if self._is_variable_free:
-      return py_utils.Transform(lambda _: py_utils.NestedMap(), self.children)
-    if self._create_variables_status == _CreateLayerVariablesStatus.NOT_CALLED:
-      raise ValueError(
-          'Cannot access vars for layer %s before they have been created.' %
-          self.params.cls)
     ret = py_utils.Transform(lambda x: x.vars, self.children)
     for k in self._private_vars.keys():
       ret[k] = self._private_vars[k]
@@ -630,10 +617,6 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
     """
     self._private_vars_transform_restore_stack.append(self._private_vars)
     self._private_vars = {key: fn(x) for key, x in self._private_vars.items()}
-    if self._create_variables_status == _CreateLayerVariablesStatus.NOT_CALLED:
-      raise ValueError(
-          'Cannot access vars for layer %s before they have been created.' %
-          self.params.cls)
     py_utils.Transform(
         lambda c: c._TransformVarsInternal(fn),  # pylint: disable=protected-access
         self.children)
@@ -657,13 +640,6 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
   @property
   def theta(self):
     """Returns theta of this layer and its children in a `.NestedMap`."""
-    if self._is_variable_free:
-      return py_utils.Transform(lambda _: py_utils.NestedMap(), self.children)
-    if self._create_variables_status == _CreateLayerVariablesStatus.NOT_CALLED:
-      raise ValueError(
-          'Cannot access theta for layer %s before they have been created.' %
-          self.params.cls)
-
     stack_size = len(_THETA_STACK.stack)
     _THETA_STACK.stack.append(self)
     try:
@@ -685,14 +661,18 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
 
     # When ExecutorTpu specifies the EMA (e.g. when running eval/decode program
     # with EMA enabled), use the EMA version of the variables if applicable.
-    ema = py_utils.ExponentialMovingAverage()
-    if self.do_eval and ema:
+    if self.cluster.is_executor_tpu and self.do_eval and self.ema:
+      vars_loaded_as_ema = self.params.is_inference or (self.do_eval and
+                                                        not py_utils.use_tpu())
+      assert not vars_loaded_as_ema, (
+          'Not able to use EMA variables since the layer variables are '
+          'potentially already loaded as EMA variables.')
 
       def MaybeUseEmaVar(x):
         if not isinstance(x, tf.Variable):
           raise ValueError('EMA is used but self._private_theta contains '
                            f'non-variables: {x}.')
-        ema_x = ema.average(x)
+        ema_x = self.ema.average(x)
         return ema_x if ema_x is not None else x
 
       private_theta = py_utils.Transform(MaybeUseEmaVar, private_theta)
@@ -769,9 +749,6 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
         '%s exists in global_accumulator: %s' %
         (name, list(self._private_accumulators.keys())))
 
-  def _VariableCollections(self) -> List[str]:
-    return [LAYER_WT, '%s_vars' % self.__class__.__name__]
-
   def RegisterAccumulator(self, name, acc):
     """Registers an accumulator for this layer.
 
@@ -811,7 +788,7 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
 
     Args:
       name: The accumulator name. Shares a namespace with children, vars and
-          extra theta.
+        extra theta.
       acc: An `Accumulator` instance.
     """
     self._CheckName(name)
@@ -852,25 +829,23 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
           self.CreateVariable(
               'weight', py_utils.WeightParams(shape=[100, 100]))
 
-    In some contexts, eg. TPU training, variables may not be created immediately
-    but rather the creation request will be cached and created later via a call
-    to layer.InstantiateVariables().
-
     Args:
       name: Variable name which is used as the key into vars/theta.
       var_params: `Params` used to create the variable.
       **kwargs: Keyword args passed to `.py_utils.CreateVariable`.
     """
+<<<<<<< HEAD
     # tf.logging.info(self.params.device_mesh)
     # tf.logging.info(name)
+=======
+    kwargs.setdefault('default_seed', self.params.random_seed)
+>>>>>>> 04b8b865f057fda336993fc386554654d4c2f850
     if self.params.device_mesh is not None:
       if (len([dim for dim in var_params.shape if dim > 1]) > 1 and
           var_params.tensor_split_dims_mapping is None):
         tf.logging.warning(
             'tensor_split_dims_mapping missing for %s.%s: shape=%s', self.path,
             name, var_params.shape)
-    if self._is_variable_free:
-      raise ValueError('Cannot create variable in variable free layer.')
     self._CheckName(name)
     if (self.params.skip_lp_regularization and
         py_utils.SKIP_LP_REGULARIZATION not in var_params.collections):
@@ -881,29 +856,8 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
           collections=(var_params.collections +
                        [py_utils.SKIP_LP_REGULARIZATION]))
     self._var_symbolic_shape_map[name] = var_params.shape
-    meta = CreateVariableMeta(
-        var_params=var_params.Copy(),
-        kwargs=kwargs)
-    if self._create_variables_status == _CreateLayerVariablesStatus.IN_PROGRESS:
-      # If InstantiateVariables has been called, create variable immediately.
-      self._CreateVariableInternal(name, meta)
-    else:
-      # Otherwise cache the variable to be created.
-      self._variables_to_create[name] = meta
 
-  def _CreateVariableInternal(self, name: str,
-                              meta: CreateVariableMeta) -> None:
-    """Immediately creates the variable described by `meta`.
-
-    DO NOT OVERRIDE. For internal use only. Subclasses of BaseLayer should use
-    self.CreateVariable() to create variables.
-
-    Args:
-      name: The variable name.
-      meta: A CreateVariableMeta describing the variable to be created.
-    """
-    meta.kwargs.setdefault('default_seed', self.params.random_seed)
-    var = py_utils.CreateVariable(name, meta.var_params, **meta.kwargs)
+    var = py_utils.CreateVariable(name, var_params, **kwargs)
     self._private_vars[name] = var
 
     if py_utils.IsEagerMode():
@@ -922,36 +876,21 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
     self._private_theta[name] = value
 
   @contextlib.contextmanager
-  def _SelfVariableScope(self):
+  def _SelfVariableScope(self, params=None, enter_name_scope=True):
     """Internal. Used to ensure the same variable & name scopes are used."""
-    if not self._self_variable_scope:
-      with tf.variable_scope(py_utils.SanitizeScopeKey(
-          self.params.name)) as scope:
+    if not hasattr(self, '_self_variable_scope'):
+      params = params or self.params
+      self._parent_variable_scope = tf.get_variable_scope()
+      with tf.variable_scope(py_utils.SanitizeScopeKey(params.name)) as scope:
         self._self_variable_scope = scope
     with contextlib.ExitStack() as stack:
       stack.enter_context(
           tf.variable_scope(
               self._self_variable_scope, auxiliary_name_scope=False))
-      stack.enter_context(
-          tf.name_scope(self._self_variable_scope.original_name_scope))
+      if enter_name_scope:
+        stack.enter_context(
+            tf.name_scope(self._self_variable_scope.original_name_scope))
       yield stack
-
-  def InstantiateVariables(self) -> None:
-    """Create variables for this layer and child layers.
-
-    DO NOT OVERRIDE. Override self._CreateLayerVariables instead.
-    """
-    if self._create_variables_status != _CreateLayerVariablesStatus.NOT_CALLED:
-      return
-    self._create_variables_status = _CreateLayerVariablesStatus.IN_PROGRESS
-
-    self._CreateChildrenVariables()
-
-    if not self._is_variable_free:
-      with self._SelfVariableScope():
-        for name, meta in list(self._variables_to_create.items()):
-          self._CreateVariableInternal(name, meta)
-        self._CreateLayerVariables()
 
   def _child_variable_scope_override(self):
     """Override the variable scope for individual children.
@@ -967,21 +906,14 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
     """
     return {}
 
-  def _CreateChildrenVariables(self) -> None:
-    """Create variables for child layers."""
-    for child in self._children_list:
-      if self._is_variable_free and not child._is_variable_free:  # pylint: disable=protected-access
-        raise ValueError(
-            'Variable free layer %s(%s) child %s(%s) has variables.' %
-            (self.params.name, self.params.cls, child.params.name,
-             child.params.cls))
-
   def _CreateLayerVariables(self) -> None:
-    """Actually create variables for this layer.
+    """Create variables for this layer.
 
-    Subclasses should override this function.
+    This is a legacy method. Variables can be created directly in the layer
+    __init__ method.
 
-    Variables are created inside of tf.variable_scope(self.params.name).
+    Variables are created inside of self._SelfVariableScope() which is usually
+    tf.variable_scope(self.params.name).
     """
     pass
 
@@ -1019,12 +951,14 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
     with contextlib.ExitStack() as context_stack:
       scope_overrides = self._child_variable_scope_override()
       if name in scope_overrides:
+        # When child_variable_scope_override is provided, the override is
+        # applied on top of the parent variable scope.
+        context_stack.enter_context(
+            tf.variable_scope(self._parent_variable_scope))
         for scope in scope_overrides[name]:
           if isinstance(scope, str):
             scope = tf.variable_scope(scope)
           context_stack.enter_context(scope)
-      else:
-        context_stack.enter_context(self._SelfVariableScope())
       yield context_stack
 
   def CreateChild(self, name: str, params: BaseLayerParamsT) -> None:

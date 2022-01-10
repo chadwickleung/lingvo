@@ -47,7 +47,6 @@ class DataSource(base_layer.BaseLayer):
 
   def __init__(self, params):
     super().__init__(params)
-    self.SetVariableFree()
     self._input_generator = None
 
   def SetInputGenerator(self, input_generator):
@@ -404,20 +403,6 @@ class TFDatasetSource(DataSource):
     self._InitIterator()
     if py_utils.GetUnitTestSession():
       self.Initialize(py_utils.GetUnitTestSession())
-    # This piece of code must be run in Eager trainer and `tf.function`
-    if py_utils.IsEagerMode() and not tf.executing_eagerly(
-    ) and py_utils.IsExperimentalIteratorCapture():
-      tf.logging.info('Using calltime capture for the iterator')
-      # TODO(jiaweix): we should consider replacing calltime capture with
-      # explicit iterator arguments to the `tf.function`. (related: b/207421666)
-      # This is because
-      # (1) the current approach relies on a private api;
-      # (2) `capture_call_time_value` does not work well with complex ops e.g.
-      # while_loop - the decode program happens to not rely on while_loop.
-      iter_spec = self._iterator[self.host_id]._type_spec  # pylint: disable=protected-access
-      captured_it = tf.compat.v1.get_default_graph().capture_call_time_value(
-          lambda: self._iterator[self.host_id], iter_spec)
-      return next(captured_it)
     return self._iterator[self.host_id].get_next()
 
 
@@ -851,8 +836,6 @@ def GetTFDataServiceDataSet(job_name,
   if dataset_id is None:
     if dataset is None:
       raise ValueError('Either a dataset or dataset_id must be provided.')
-    tf.logging.info('Dataset debug before register_dataset: %r',
-                    dataset.__debug_string__())
     dataset_id = tf.data.experimental.service.register_dataset(
         service=tf_data_service_address, dataset=dataset)
     element_spec = dataset.element_spec
@@ -902,6 +885,11 @@ class TFDataServiceSource(TFDatasetTransform):
         # Hacky: relies on SetInputGenerator called in input_generator.__init__,
         # before p.tpu_infeed_parallelism is used.
         self._input_generator.params.tpu_infeed_parallelism = 1
+    if self._input_generator.params.use_per_host_infeed:
+      tf.logging.warning(
+          'When using tf.data service, it is usually better to set '
+          'use_per_host_infeed=False unless the global batch is unable to fit '
+          'in memory of a single machine.')
 
   def GetDataset(self):
     p = self.params
@@ -924,8 +912,6 @@ class TFDataServiceSource(TFDatasetTransform):
                 window_size=self.num_hosts))
         dataset = dataset.flat_map(lambda x: x)
 
-      tf.logging.info('Dataset debug before register_dataset: %r',
-                      dataset.__debug_string__())
       self._dataset_id = tf.data.experimental.service.register_dataset(
           service=self.cluster.tf_data_service_address, dataset=dataset)
       self._element_spec = dataset.element_spec

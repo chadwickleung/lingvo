@@ -677,29 +677,6 @@ def IsEagerMode():
   return _IS_EAGER_MODE
 
 
-_EXPERIMENTAL_CAPTURE = False
-
-
-def SetExperimentalIteratorCapture(experimental_capture=True):
-  global _EXPERIMENTAL_CAPTURE
-  _EXPERIMENTAL_CAPTURE = experimental_capture
-
-
-def IsExperimentalIteratorCapture():
-  return _EXPERIMENTAL_CAPTURE
-
-
-class ExperimentalIteratorCapture:
-
-  def __enter__(self):
-    global _EXPERIMENTAL_CAPTURE
-    _EXPERIMENTAL_CAPTURE = True
-
-  def __exit__(self, *args):
-    global _EXPERIMENTAL_CAPTURE
-    _EXPERIMENTAL_CAPTURE = False
-
-
 # Maintains a tf.GradientTape stack.
 _GRADIENT_TAPE_STACK = ThreadLocalStack()
 
@@ -716,20 +693,33 @@ def GradientTape(*args, **kwargs):
     _GRADIENT_TAPE_STACK.stack.pop()
 
 
-# The tf.train.ExponentialMovingAverage singleton used by all programs when
-# training with ExecutorTpu.
-_EXECUTOR_EMA = None
+def CreateEMAForModel(model_params, global_step):
+  """Creates an EMA object for model with param `model_params` if applicable."""
+  p = model_params
 
+  # Check that EMA settings for the model and subtasks match.
+  def CheckEMA(task_name, task_params):
+    for field in ['ema_decay', 'ema_decay_moving_vars']:
+      model_value = p.train.Get(field)
+      task_value = task_params.train.Get(field)
+      if task_value != model_value:
+        raise ValueError(
+            f'Params {field} does not match. Value in model: '
+            f'{model_value}, value in task {task_name}: {task_value}')
 
-def SetExponentialMovingAverage(ema):
-  global _EXECUTOR_EMA
-  assert ema
-  assert not _EXECUTOR_EMA, 'EMA was set before.'
-  _EXECUTOR_EMA = ema
+  if 'task_params' in p:
+    # MultiTaskModel. All subtasks should use the same ema settings.
+    for task_name, task_params in p.task_params.IterParams():
+      CheckEMA(task_name, task_params)
+  else:
+    assert 'task' in p
+    # SingleTaskModel.
+    CheckEMA(p.task.name, p.task)
 
-
-def ExponentialMovingAverage():
-  return _EXECUTOR_EMA
+  if p.train.ema_decay > 0:
+    return tf.train.ExponentialMovingAverage(
+        decay=p.train.ema_decay, num_updates=global_step)
+  return None
 
 
 def SessionConfig(soft_placement=True,
@@ -1718,7 +1708,6 @@ def MaybeOpportunisticVariableReuse(next_creator, **kwargs):
 # TODO(yonghui): Add support for partitioned Variables.
 def CreateVariable(name,
                    params,
-                   reuse=None,
                    trainable=True,
                    collections=None,
                    default_seed=None,
@@ -1730,8 +1719,6 @@ def CreateVariable(name,
     name: A string, name of the variable.
     params: A WeightParams specifying the details of how this variable should be
       constructed and initialized.
-    reuse: Whether or not to reuse an existing variable. It has the same
-      semantics as the reuse arg in tf.variable_scope.
     trainable: Whether or not the variable is trainable.
     collections: Override the default variable collection (
       tf.GraphKeys.GLOBAL_VARIABLES). Note that specifying a collections
@@ -1750,16 +1737,15 @@ def CreateVariable(name,
     The created variable.
   """
   if use_stateless_vars_init():
-    return _CreateVariableStateless(name, params, reuse, trainable, collections,
+    return _CreateVariableStateless(name, params, trainable, collections,
                                     default_seed, synchronization, aggregation)
   else:
-    return _CreateVariableStateful(name, params, reuse, trainable, collections,
+    return _CreateVariableStateful(name, params, trainable, collections,
                                    default_seed, synchronization, aggregation)
 
 
 def _CreateVariableStateful(name,
                             params,
-                            reuse=None,
                             trainable=True,
                             collections=None,
                             default_seed=None,
@@ -1771,8 +1757,6 @@ def _CreateVariableStateful(name,
     name: A string, name of the variable.
     params: A WeightParams specifying the details of how this variable should be
       constructed and initialized.
-    reuse: Whether or not to reuse an existing variable. It has the same
-      semantics as the reuse arg in tf.variable_scope.
     trainable: Whether or not the variable is trainable.
     collections: Override the default variable collection (
       tf.GraphKeys.GLOBAL_VARIABLES).
@@ -1876,7 +1860,7 @@ def _CreateVariableStateful(name,
           custom_getter=scope.custom_getter,
           caching_device=scope.caching_device,
           use_resource=True)
-    with tf.variable_scope(var_scope), tf.variable_scope(var_name, reuse=reuse):
+    with tf.variable_scope(var_scope), tf.variable_scope(var_name):
       return next_creator(**kwargs)
 
   with contextlib.ExitStack() as context_stack:
@@ -1923,7 +1907,6 @@ def _CreateVariableStateful(name,
 
 def _CreateVariableStateless(name,
                              params,
-                             reuse=None,
                              trainable=True,
                              collections=None,
                              default_seed=None,
@@ -1935,8 +1918,6 @@ def _CreateVariableStateless(name,
     name: A string, name of the variable.
     params: A WeightParams specifying the details of how this variable should be
       constructed and initialized.
-    reuse: Whether or not to reuse an existing variable. It has the same
-      semantics as the reuse arg in tf.variable_scope.
     trainable: Whether or not the variable is trainable.
     collections: Override the default variable collection (
       tf.GraphKeys.GLOBAL_VARIABLES).
@@ -1997,7 +1978,7 @@ def _CreateVariableStateless(name,
           custom_getter=scope.custom_getter,
           caching_device=scope.caching_device,
           use_resource=True)
-    with tf.variable_scope(var_scope), tf.variable_scope(var_name, reuse=reuse):
+    with tf.variable_scope(var_scope), tf.variable_scope(var_name):
       return next_creator(**kwargs)
 
   with contextlib.ExitStack() as context_stack:

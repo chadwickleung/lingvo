@@ -86,17 +86,6 @@ def GetExecutorParams(model_name, cluster_params, model_registry):
     if issubclass(train_cfg.cls, base_model.MultiTaskModel):
       multi_task_train_cfg = train_cfg
 
-      # Check that all subtasks use the same ema settings.
-      for task_name, task_params in (
-          multi_task_train_cfg.task_params.IterParams()):
-        for field in ['ema_decay', 'ema_decay_moving_vars']:
-          model_value = multi_task_train_cfg.train.Get(field)
-          task_value = task_params.train.Get(field)
-          if task_value != model_value:
-            raise ValueError(
-                f'Params {field} does not match. Value in model: '
-                f'{model_value}, value in task {task_name}: {task_value}')
-
       for k, _ in multi_task_train_cfg.task_params.IterParams():
         if multi_task_train_cfg.share_model_object:
           # Create MultiTaskSubModel params from a MultiTaskModelParams.
@@ -140,15 +129,6 @@ def GetExecutorParams(model_name, cluster_params, model_registry):
               eval_dataset_name] = eval_task_params
         ps_params_dict[k] = program_schedule_params
     else:
-      if train_cfg.task.train.ema_decay > 0:
-        # Propagate the ema config from task params to model params, so
-        # ExecutorTpu can treat single and multi task model the same way.
-        # Note this propagation is also done in SingleTaskModel for
-        # non-ExecutorTpu use cases.
-        train_cfg.train.ema_decay = train_cfg.task.train.ema_decay
-        train_cfg.train.ema_decay_moving_vars = (
-            train_cfg.task.train.ema_decay_moving_vars)
-
       program_schedule_params = ps_cfg
 
       # Confirmed: Creates {'Train', p (param)}, where p.task == what returned by Task()
@@ -329,6 +309,7 @@ class ExecutorTpu(base_runner.BaseRunner):
     self._program_schedule_dict = {}
     self._programs = []
 
+<<<<<<< HEAD
     # Confirmed: Only one thing in the dict since it's a SingleTaskModel
     # task_string == '' and program_schedule_params == what returned by ProgramSchedule() in lm.params
     for task_string, program_schedule_params in ps_params_dict.items():
@@ -357,6 +338,29 @@ class ExecutorTpu(base_runner.BaseRunner):
       self._programs += ps.Programs()
       if program_schedule_params.ml_perf.benchmark_name is not None:
         self._ml_perf = program_schedule_params.ml_perf
+=======
+    with self._cluster:
+      # Create the ExponentialMovingAverage singleton shared by all programs, if
+      # applicable.
+      ema = py_utils.CreateEMAForModel(train_cfg, self._global_step_var)
+      for task_string, program_schedule_params in ps_params_dict.items():
+        program_schedule_params.logdir = self._logdir
+        program_schedule_params.num_splits_per_client = data_parallelism
+        program_schedule_params.task_name = task_string
+        # If the model was created above, we'll inject it here as a
+        # shared_model.
+        ps = program_schedule_params.Instantiate(
+            shared_model=shared_model,
+            trial=self._trial,
+            ema=ema,
+            tf_master=self._tf_master)
+        self._program_schedule_dict[task_string] = ps
+        tf.logging.info('program_schedule_params: %s',
+                        program_schedule_params.ToText())
+        self._programs += ps.Programs()
+        if program_schedule_params.ml_perf.benchmark_name is not None:
+          self._ml_perf = program_schedule_params.ml_perf
+>>>>>>> 04b8b865f057fda336993fc386554654d4c2f850
 
     tf.logging.info('num_programs: %d', len(self._programs))
 
@@ -377,17 +381,6 @@ class ExecutorTpu(base_runner.BaseRunner):
         stack.enter_context(pdb_wrapper.catch_post_mortem())
       with py_utils.VariableStore(), py_utils.VariableRenameScope(
           self._variable_renaming_rules):
-        global_step = py_utils.GetOrCreateGlobalStepVar()
-        if train_cfg.train.ema_decay > 0:
-          # Create the ExponentialMovingAverage singleton shared by all
-          # programs.
-          ema = tf.train.ExponentialMovingAverage(
-              decay=train_cfg.train.ema_decay, num_updates=global_step)
-          py_utils.SetExponentialMovingAverage(ema)
-
-        # Note: when EMA is used, there must be a train program, and its graph
-        # must be built before any eval programs in order to apply EMA. This is
-        # currently guaranteed by SimpleProgramSchedule.
         for program in self._programs:
           # Confirmed: Calls BuildTpuSubgraph of class TrainProgram in program.py
           # since self._programs is a list of TrainProgram
@@ -474,7 +467,6 @@ class ExecutorTpu(base_runner.BaseRunner):
           self._variable_renaming_rules):
         py_utils.GetOrCreateGlobalStepVar()
         shared_model = train_cfg.Instantiate()
-        shared_model.InstantiateVariables()
 
     return shared_model
 
