@@ -961,6 +961,11 @@ class GraphLayer(base_layer.BaseLayer):
         tf.logging.vlog(1, 'signature: %s', p.sub[i][0])
         tf.logging.vlog(1, 'GraphLayer: call %s %s %d %s', ch.params.name, ch,
                         len(input_args), str(input_args))
+        # Chadwick: Added following loggings to inspect FProp
+        tf.logging.info('signature: %s', p.sub[i][0])
+        tf.logging.info('name: %s', self.name)
+        tf.logging.info('GraphLayer: call %s %s %d %s', ch.params.name, ch,
+                        len(input_args), str(input_args))
         # Confirmed: ch.FProp is calling the sublayer's FProp method
         ch_out = ch.FProp(th, *input_args)
         if len(sig.outputs) == 1:
