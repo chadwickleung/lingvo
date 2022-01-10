@@ -309,58 +309,38 @@ class ExecutorTpu(base_runner.BaseRunner):
     self._program_schedule_dict = {}
     self._programs = []
 
-<<<<<<< HEAD
-    # Confirmed: Only one thing in the dict since it's a SingleTaskModel
-    # task_string == '' and program_schedule_params == what returned by ProgramSchedule() in lm.params
-    for task_string, program_schedule_params in ps_params_dict.items():
-      program_schedule_params.logdir = self._logdir
-      program_schedule_params.num_splits_per_client = data_parallelism
-      # task_string == ''
-      program_schedule_params.task_name = task_string
-
-      # If the model was created above, we'll inject it here as a shared_model.
-      # shared_model == None as it is not a MultiTaskModel
-      # Confirmed: This will instantiate the SimpleProgramScheduleForTask specified in ProgramSchedule().
-      # A SimpleProgramSchedule will be initialized thru hyperparams.py
-      # Also initializes TrainProgram.
-      tf.logging.info('Instantiate Program Schedule using its params')
-      ps = program_schedule_params.Instantiate(
-          shared_model=shared_model,
-          trial=self._trial,
-          tf_master=self._tf_master)
-      self._program_schedule_dict[task_string] = ps
-
-      # Confirmed: This is the long chunk in the output log
-      tf.logging.info('program_schedule_params: %s',
-                      program_schedule_params.ToText())
-      # Confirmed: self._programs should only contain train_programs
-      # ps.Programs() returns train_programs that was set in the above instantiation
-      self._programs += ps.Programs()
-      if program_schedule_params.ml_perf.benchmark_name is not None:
-        self._ml_perf = program_schedule_params.ml_perf
-=======
     with self._cluster:
       # Create the ExponentialMovingAverage singleton shared by all programs, if
       # applicable.
       ema = py_utils.CreateEMAForModel(train_cfg, self._global_step_var)
+      # Confirmed: Only one thing in the dict since it's a SingleTaskModel
+      # task_string == '' and program_schedule_params == what returned by ProgramSchedule() in lm.params
       for task_string, program_schedule_params in ps_params_dict.items():
         program_schedule_params.logdir = self._logdir
         program_schedule_params.num_splits_per_client = data_parallelism
         program_schedule_params.task_name = task_string
         # If the model was created above, we'll inject it here as a
         # shared_model.
+        # shared_model == None as it is not a MultiTaskModel
+        # Confirmed: This will instantiate the SimpleProgramScheduleForTask specified in ProgramSchedule().
+        # A SimpleProgramSchedule will be initialized thru hyperparams.py
+        # Also initializes TrainProgram.
+        tf.logging.info('Instantiate Program Schedule using its params')
         ps = program_schedule_params.Instantiate(
             shared_model=shared_model,
             trial=self._trial,
             ema=ema,
             tf_master=self._tf_master)
         self._program_schedule_dict[task_string] = ps
+
+        # Confirmed: This is the long chunk in the output log
         tf.logging.info('program_schedule_params: %s',
                         program_schedule_params.ToText())
+        # Confirmed: self._programs should only contain train_programs
+        # ps.Programs() returns train_programs that was set in the above instantiation
         self._programs += ps.Programs()
         if program_schedule_params.ml_perf.benchmark_name is not None:
           self._ml_perf = program_schedule_params.ml_perf
->>>>>>> 04b8b865f057fda336993fc386554654d4c2f850
 
     tf.logging.info('num_programs: %d', len(self._programs))
 

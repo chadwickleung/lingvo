@@ -369,49 +369,6 @@ class BaseTask(base_layer.BaseLayer):
     else:
       self._global_step_var = py_utils.GetOrCreateGlobalStepVar()
 
-<<<<<<< HEAD
-    if p.input:
-      # TODO(zhifengc): Consider a simpler way to ensure the input
-      # generator stops after one epoch.
-      if self.do_eval and p.eval:
-        seq_inp = issubclass(p.input.cls,
-                             base_input_generator.BaseInputGeneratorFromFiles)
-        if p.input.num_samples > 0:
-          if (p.eval.samples_per_summary
-              == 0) or (p.input.num_samples < p.eval.samples_per_summary):
-            p.eval.samples_per_summary = p.input.num_samples
-            # If we know the dataset size and we want to evaluate the full
-            # set, we need to coordinate the input generator to flush out
-            # all samples so the evaler and decoder compute metrics on the
-            # whole set for each summary step.
-            if seq_inp:
-              p.input.flush_every_n = p.input.num_samples
-          if p.eval.decoder_samples_per_summary is not None and (
-              p.eval.decoder_samples_per_summary > p.input.num_samples):
-            p.eval.decoder_samples_per_summary = p.input.num_samples
-        if p.input.eval_samples_per_summary is not None:
-          p.eval.samples_per_summary = p.input.eval_samples_per_summary
-        if p.input.decoder_samples_per_summary is not None:
-          p.eval.decoder_samples_per_summary = (
-              p.input.decoder_samples_per_summary)
-        if p.input.num_samples == 0 and not p.input.resettable:
-          # Dataset size is unknown. Computes eval summary based on num_samples.
-          # We require static dataset size for non-resettable inputs.
-          # Ignore if the dataset is repeated.
-          repeated = (
-              getattr(p.input, 'repeat_steps', None) or
-              getattr(p.input, 'repeat_with_sentinel', False))
-          if not repeated:
-            assert p.eval.samples_per_summary > 0
-        if seq_inp and p.input.num_batcher_threads > 1:
-          tf.logging.warning('input.num_batcher_threads > 1 inside eval mode.  '
-                             'The input generator may not iterate over exactly '
-                             'one epoch per run')
-      input_params = input_policy.Apply(p.input)
-
-      tf.logging.info('input_params: %s', input_params)
-      self.CreateChild('input', input_params)
-=======
     with py_utils.GlobalStepContext(self._global_step_var):
       if p.input:
         # TODO(zhifengc): Consider a simpler way to ensure the input
@@ -468,38 +425,14 @@ class BaseTask(base_layer.BaseLayer):
           else:
             self.CreateChildren('learners', [tp.learner])
       self._UpdateVnConfig()
->>>>>>> 04b8b865f057fda336993fc386554654d4c2f850
 
       if (tp and tp.pruning_hparams_dict and
           pruning_utils.UsePruningInterface(tp.pruning_hparams_dict)):
         pruning_utils.PruningOp.Setup(tp.pruning_hparams_dict, self.global_step)
 
-<<<<<<< HEAD
-    # p.train can be None if this task is the teacher/student task in a
-    # DistillationTask.
-
-    # Confirmed: Produces 'Ignoring...' info (learner.py)
-    if tp:
-      self._SetLearnerFromLegacyParams(tp)
-      if tp.learner is not None:
-        if isinstance(tp.learner, (list, tuple)):
-          self.CreateChildren('learners', tp.learner)
-        else:
-          self.CreateChildren('learners', [tp.learner])
-    self._UpdateVnConfig()
-
-    if (tp and tp.pruning_hparams_dict and
-        pruning_utils.UsePruningInterface(tp.pruning_hparams_dict)):
-      pruning_utils.PruningOp.Setup(tp.pruning_hparams_dict, self.global_step)
-
-  def InstantiateVariables(self):
-    with py_utils.GlobalStepContext(self._global_step_var):
-      super().InstantiateVariables()
-=======
     # The set of ids of TF graphs in which ApplyExponentialMovingAverage has
     # been called.
     self._graphs_applied_ema = set()
->>>>>>> 04b8b865f057fda336993fc386554654d4c2f850
 
   def _SetLearnerFromLegacyParams(self, tp):
     """Sets tp.learner based on legacy params."""
@@ -1297,13 +1230,10 @@ class SingleTaskBase(BaseModel):
     if self.ema:
       self._task.ApplyExponentialMovingAverage(self.ema)
       self._MakeEMAVariablesDict()
-<<<<<<< HEAD
 
     tf.logging.info('##########################################################')
     tf.logging.info('Working on %s', self._task)
     tf.logging.info('Forward Propagation')
-=======
->>>>>>> 04b8b865f057fda336993fc386554654d4c2f850
     self._task.FPropDefaultTheta()
     tf.logging.info('Backward Propagation')
     self._task.BProp()

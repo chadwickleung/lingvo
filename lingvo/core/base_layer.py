@@ -185,21 +185,6 @@ class BaseLayerMeta(type):
     return cls
   # pylint: enable=bad-mcs-classmethod-argument
 
-<<<<<<< HEAD
-  def __call__(cls, *args, **kwargs):
-    # tf.logging.info('################Trying to create child################')
-    self = super().__call__(*args, **kwargs)
-    # This happens after self.__init__()
-    self.InstantiateVariables()
-    # pylint: disable=protected-access
-    self._disable_create_child = True
-    self._VerifyChildren()
-    self._VerifyVarsAndTheta()
-    # pylint: enable=protected-access
-    return self
-
-=======
->>>>>>> 04b8b865f057fda336993fc386554654d4c2f850
 
 class ABCLayerMeta(BaseLayerMeta, abc.ABCMeta):
   pass
@@ -834,12 +819,7 @@ class BaseLayer(tf.Module, metaclass=BaseLayerMeta):
       var_params: `Params` used to create the variable.
       **kwargs: Keyword args passed to `.py_utils.CreateVariable`.
     """
-<<<<<<< HEAD
-    # tf.logging.info(self.params.device_mesh)
-    # tf.logging.info(name)
-=======
     kwargs.setdefault('default_seed', self.params.random_seed)
->>>>>>> 04b8b865f057fda336993fc386554654d4c2f850
     if self.params.device_mesh is not None:
       if (len([dim for dim in var_params.shape if dim > 1]) > 1 and
           var_params.tensor_split_dims_mapping is None):
