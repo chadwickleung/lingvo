@@ -578,6 +578,7 @@ class TrainProgram(BaseProgram):
     # Confirmed: _task is what returned by Task()
     tf.logging.info('Done initiailizing model')
     self._task = self._model.GetTask()
+    tf.logging.info(self._task)
     self._task.input.TpuSetup()
 
     @tpu_function.on_device_training_loop
@@ -661,6 +662,7 @@ class TrainProgram(BaseProgram):
     else:
       # Chadwick: Investigate what means by global step, is it the whole model?
       tf.logging.info('Sess run for task global step')
+      tf.logging.info(self._task.global_step)
       task_global_step = sess.run(self._task.global_step)
       tf.logging.info('Done Sess run for global step')
     if self._ShouldStop(task_global_step):
