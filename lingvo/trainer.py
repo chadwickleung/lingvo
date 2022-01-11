@@ -50,7 +50,7 @@ from lingvo.core import summary_utils
 from google.protobuf import text_format
 
 # WandB
-import wandb
+# import wandb
 
 
 tf.flags.DEFINE_bool(
@@ -844,7 +844,7 @@ class RunnerManager:
     self.MaybeConfigCloudTpu()
     self.MaybeLaunchTensorFlow()
 
-    wandb.init(project="gshard-logging", entity="gshard-decode", config=FLAGS, mode="disabled")
+    # wandb.init(project="gshard-logging", entity="gshard-decode", config=FLAGS, mode="disabled")
 
     if FLAGS.job.startswith('evaler_once_'):
       # E.g., trainer --model=foo.bar.Model --logdir=...
