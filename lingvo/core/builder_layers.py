@@ -1325,6 +1325,7 @@ class FnLayer(base_layer.BaseLayer):
     Returns:
       fn(\*args).
     """
+    tf.logging.info('Calls FProp of %s', self.params.name)
     with tf.name_scope(self.params.name):
       return self.params.fn(*args)
 

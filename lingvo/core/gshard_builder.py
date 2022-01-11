@@ -405,6 +405,7 @@ class MoEBuilder(builder.Base):
     """Returns params for lambda x: x + residual_weight * DropOut(layer(LN(x)))."""
     layer_input_keys = self._EncoderLayerInMapKeys
     layer_inputs = 'x,' + ','.join(['i.' + key for key in layer_input_keys[1:]])
+    # Chadwick: We did use this EncoderLayer
     return self._Graph(
         name,
         ['i'],
@@ -1798,6 +1799,8 @@ class MoEBuilder(builder.Base):
     p = self.params
 
     def _Compute(w, inputs, paddings):
+      # Chadwick: if this doesn't show up, use wandb
+      tf.logging.info('Calls ComputeGating, prob from some FProp')
       return gshard_layers.ComputeGating(
           w=w,
           inputs=inputs,
@@ -1861,6 +1864,10 @@ class MoEBuilder(builder.Base):
     if p.num_devices and p.num_devices > 1:
       tf.logging.warning('Split API is deprecated. '
                          'Use device_mesh and MeshSplit.')
+
+    # Chadwick: If doesn't show up, use wandb
+    tf.logging.info('##############################################')
+    tf.logging.info('FeedForwardNetwork')
 
     def _Compute(gating, inputs, reshaped_inputs, wi, wo):
       return gshard_layers.FeedForwardNetworksApplyGating(

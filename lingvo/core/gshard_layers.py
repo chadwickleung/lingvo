@@ -172,6 +172,10 @@ class ShardedVarLayer(VarLayer):
       return x
 
     retval = [MaybeWeightSplitAndCastToFPropDtype(k, v) for k, v in p.weights]
+    tf.logging.info('########################################################')
+    tf.logging.info('########################################################')
+    tf.logging.info('########################################################')
+    tf.logging.info('First FProp from dec_self_attention')
     return retval[0] if len(retval) == 1 else retval
 
 
@@ -1879,6 +1883,8 @@ def Top2GatingOnLogits(inputs,
     - dispatch_tensor: G`SEC Tensor, scattering/dispatching inputs to
       experts.
   """
+  tf.logging.info('############################################################')
+  tf.logging.info('Top2GatingOnLogits')
   if mask_dtype is None:
     mask_dtype = fprop_dtype
   if use_xla_sharding:
@@ -2469,6 +2475,9 @@ def FeedForwardNetworksApplyGating(gating,
     aux_loss: scalar auxiliary loss.
   """
   t_start = time.time()
+  tf.logging.info('#######################################################')
+  tf.logging.info('Start time for ffn')
+  tf.logging.info(t_start)
   
   if device_mesh is not None:
     assert gsm_split is not None
