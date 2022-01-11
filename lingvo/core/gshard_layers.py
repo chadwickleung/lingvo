@@ -2609,6 +2609,8 @@ def FeedForwardNetworksApplyGating(gating,
   tf.logging.info(t_end)
   tf.logging.info('Time spent')
   tf.logging.info(t_end - t_start)
+  tf.logging.info('Time in dispatch')
+  tf.logging.info(t_dispatch_end - t_dispatch_start)
   return outputs, aux_loss
 
 
