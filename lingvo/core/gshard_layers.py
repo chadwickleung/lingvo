@@ -30,7 +30,7 @@ from tensorflow.compiler.tf2xla.python import xla
 from tensorflow.compiler.xla.experimental.xla_sharding import xla_sharding
 # pylint: enable=g-direct-tensorflow-import
 
-import wandb
+# import wandb
 import time
 
 
@@ -2360,16 +2360,20 @@ def ComputeGating(w,
     if paddings is not None:
       paddings = tf.reshape(paddings, [1, -1])
 
+  
   if gating_logits_dtype is None or gating_logits_dtype == fprop_dtype:
+    t_gate_einsum_start = time.time()
     logits = EinsumWithModelDim('GSM,ME->GSE', inputs, w,
                                 model_dim_reshape_segments)
   else:
+    t_gate_einsum_start = time.time()
     logits = EinsumWithModelDim(
         'GSM,ME->GSE',
         tf.cast(inputs, gating_logits_dtype),
         tf.cast(w, gating_logits_dtype),
         model_dim_reshape_segments,
         name='gating_logits_with_custom_dtype')
+  t_gate_einsum_end = time.time()
 
   top1_expert_per_example = tf.math.argmax(logits, -1)
 
@@ -2395,9 +2399,9 @@ def ComputeGating(w,
         combine_tensor, orig_inputs.shape[:2] + combine_tensor.shape[2:])
 
   t_end = time.time()
-  wandb.log({'Compute Top-2 Gating Start Time': t_start,
-             'Time in Compute Top-2 Gating': t_end - t_start,
-             'Compute Top-2 Gating End Time': t_end})
+  # wandb.log({'Compute Top-2 Gating Start Time': t_start,
+            #  'Time in Gate Einsum': t_gate_einsum_end - t_gate_einsum_start,
+            #  'Compute Top-2 Gating End Time': t_end})
 
   return py_utils.NestedMap(
       combine_tensor=combine_tensor,
@@ -2505,6 +2509,7 @@ def FeedForwardNetworksApplyGating(gating,
     # dispatch_tensor: G`ECS
     equation = 'GECS,GSM->EGCM'
     dispatch_tensor_split = gecs_split
+
   t_dispatch_start = time.time()
   expert_inputs = _Einsum(
       equation,
@@ -2585,6 +2590,7 @@ def FeedForwardNetworksApplyGating(gating,
         _NewOrHistoricSplit(gating.combine_tensor, gec_split),
         name='combined_outputs_gsm')
   else:
+    t_combine_start = time.time()
     combined_outputs = _Einsum(
         'GSEC,GECM->GSM',
         _NewOrHistoricSplit(gating.combine_tensor, gsec_split),
@@ -2597,12 +2603,12 @@ def FeedForwardNetworksApplyGating(gating,
   aux_loss = gating.aux_loss
 
   t_end = time.time()
-  wandb.log({'FFN Start Time': t_start,
-             'Time in Dispatch': t_dispatch_end - t_dispatch_start,
-             'Dispatch End Time': t_dispatch_end,
-             'Combine Start Time': t_combine_start,
-             'Time in Combine': t_combine_end - t_combine_start,
-             'FFN End Time': t_end})
+  # wandb.log({'FFN Start Time': t_start,
+  #            'Time in Dispatch': t_dispatch_end - t_dispatch_start,
+  #            'Dispatch End Time': t_dispatch_end,
+  #            'Combine Start Time': t_combine_start,
+  #            'Time in Combine': t_combine_end - t_combine_start,
+  #            'FFN End Time': t_end})
 
   tf.logging.info('################################################')
   tf.logging.info('End time for moe')
