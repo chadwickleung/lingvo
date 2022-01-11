@@ -2476,7 +2476,7 @@ def FeedForwardNetworksApplyGating(gating,
   """
   t_start = time.time()
   tf.logging.info('#######################################################')
-  tf.logging.info('Start time for ffn')
+  tf.logging.info('Start time for moe')
   tf.logging.info(t_start)
   
   if device_mesh is not None:
@@ -2604,6 +2604,11 @@ def FeedForwardNetworksApplyGating(gating,
              'Time in Combine': t_combine_end - t_combine_start,
              'FFN End Time': t_end})
 
+  tf.logging.info('################################################')
+  tf.logging.info('End time for moe')
+  tf.logging.info(t_end)
+  tf.logging.info('Time spent')
+  tf.logging.info(t_end - t_start)
   return outputs, aux_loss
 
 

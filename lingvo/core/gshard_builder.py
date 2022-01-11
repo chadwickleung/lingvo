@@ -1800,6 +1800,7 @@ class MoEBuilder(builder.Base):
 
     def _Compute(w, inputs, paddings):
       # Chadwick: if this doesn't show up, use wandb
+      # Confirmed: Showed up before actually running runners
       tf.logging.info('Calls ComputeGating, prob from some FProp')
       return gshard_layers.ComputeGating(
           w=w,
