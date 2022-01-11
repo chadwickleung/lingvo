@@ -466,7 +466,7 @@ class ExecutorTpu(base_runner.BaseRunner):
             disable_meta_optimizer=FLAGS.disable_meta_optimizer_in_executor)
         stack.enter_context(sess)
         sess.reset(self._tf_master)
-        wandb.tensorflow.log(tf.summary.merge_all())
+        # wandb.tensorflow.log(tf.summary.merge_all())
         config_proto = (
             self._tpu_embedding.config_proto
             if self._tpu_embedding is not None else None)
