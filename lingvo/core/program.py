@@ -682,6 +682,7 @@ class TrainProgram(BaseProgram):
     if self._ShouldStop(task_global_step):
       return True
 
+    # Confirmed: self._ml_perf == False
     if self._ml_perf:
       tf.logging.info('self._ml_perf is True')
       mlp_log.mlperf_print(
@@ -1774,7 +1775,8 @@ class SimpleProgramSchedule:
             key='run_start', value=None)
     p = self.params
     start_time = time.time()
-    for _ in range(p.train_executions_per_eval):
+    for step in range(p.train_executions_per_eval):
+      tf.logging.info('Training for step: %d', step)
       done = self.train_program.Run(sess)
       if done:
         break

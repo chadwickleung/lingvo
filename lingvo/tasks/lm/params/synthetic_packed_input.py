@@ -75,7 +75,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
   GATED_GELU = True
   POSITIONAL_EMBEDDING = False
   USE_REPEAT_LAYER = False
-  TRAIN_STEPS_PER_LOOP = 100
+  TRAIN_STEPS_PER_LOOP = 50  # _steps_per_loop param
   MOE = True
   MOE_HIDDEN_DIM = MODEL_DIM
 
@@ -142,10 +142,10 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
     p.train.learning_rate = 1.0
 
     p.train.lr_schedule = schedule.SqrtDecay.Params().Set(
-        warmup_steps=100, multiplier=1.0)
+        warmup_steps=50, multiplier=1.0)
 
-    p.train.max_steps = 200
-    p.train.save_max_to_keep = 100
+    p.train.max_steps = 100
+    p.train.save_max_to_keep = 50
 
     return p
 
