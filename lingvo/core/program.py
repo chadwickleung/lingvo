@@ -1776,6 +1776,7 @@ class SimpleProgramSchedule:
     p = self.params
     start_time = time.time()
     for step in range(p.train_executions_per_eval):
+      # Confirmed: p.train_executions_per_eval is set in lm params, it's the max_step / steps_per_loop
       tf.logging.info('Training for step: %d', step)
       done = self.train_program.Run(sess)
       if done:
