@@ -44,7 +44,7 @@ from lingvo import model_registry
 from lingvo.core import gshard_decode
 import numpy as np
 
-# import wandb
+import wandb
 
 FLAGS = tf.flags.FLAGS
 
