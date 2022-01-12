@@ -975,6 +975,7 @@ class GraphLayer(base_layer.BaseLayer):
         for n, t in zip(sig.outputs, ch_out):
           graph_tensors.StoreTensor(n, t)
 
+      tf.logging.info('Done FProp for self._seq')
       layer_out = tuple(graph_tensors.GetTensor(x) for x in p.output_endpoints)
       if len(layer_out) == 1:
         layer_out = layer_out[0]
