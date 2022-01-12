@@ -2479,9 +2479,6 @@ def FeedForwardNetworksApplyGating(gating,
     aux_loss: scalar auxiliary loss.
   """
   t_start = time.time()
-  tf.logging.info('#######################################################')
-  tf.logging.info('Start time for moe')
-  tf.logging.info(t_start)
   
   if device_mesh is not None:
     assert gsm_split is not None
@@ -2611,12 +2608,12 @@ def FeedForwardNetworksApplyGating(gating,
              'MOE End Time': t_end})
 
   tf.logging.info('################################################')
-  tf.logging.info('MOE Start Time: %d', t_start)
-  tf.logging.info('Time in Dispatch: %d', t_dispatch_end - t_dispatch_start)
-  tf.logging.info('Dispatch End Time: %d', t_dispatch_end)
-  tf.logging.info('Combine Start Time: %d', t_combine_start)
-  tf.logging.info('Time in Combine: %d', t_combine_end - t_combine_start)
-  tf.logging.info('MOE End Time: %d', t_end)
+  tf.logging.info('MOE Start Time: %.7f', t_start)
+  tf.logging.info('Time in Dispatch: %.7f', t_dispatch_end - t_dispatch_start)
+  tf.logging.info('Dispatch End Time: %.7f', t_dispatch_end)
+  tf.logging.info('Combine Start Time: %.7f', t_combine_start)
+  tf.logging.info('Time in Combine: %.7f', t_combine_end - t_combine_start)
+  tf.logging.info('MOE End Time: %.7f', t_end)
   tf.logging.info('################################################')
   
   return outputs, aux_loss
