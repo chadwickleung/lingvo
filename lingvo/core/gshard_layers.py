@@ -30,7 +30,7 @@ from tensorflow.compiler.tf2xla.python import xla
 from tensorflow.compiler.xla.experimental.xla_sharding import xla_sharding
 # pylint: enable=g-direct-tensorflow-import
 
-# import wandb
+import wandb
 import time
 
 
@@ -2399,9 +2399,9 @@ def ComputeGating(w,
         combine_tensor, orig_inputs.shape[:2] + combine_tensor.shape[2:])
 
   t_end = time.time()
-  # wandb.log({'Compute Top-2 Gating Start Time': t_start,
-            #  'Time in Gate Einsum': t_gate_einsum_end - t_gate_einsum_start,
-            #  'Compute Top-2 Gating End Time': t_end})
+  wandb.log({'Compute Top-2 Gating Start Time': t_start,
+             'Time in Gate Einsum': t_gate_einsum_end - t_gate_einsum_start,
+             'Compute Top-2 Gating End Time': t_end})
 
   return py_utils.NestedMap(
       combine_tensor=combine_tensor,
@@ -2603,20 +2603,22 @@ def FeedForwardNetworksApplyGating(gating,
   aux_loss = gating.aux_loss
 
   t_end = time.time()
-  # wandb.log({'FFN Start Time': t_start,
-  #            'Time in Dispatch': t_dispatch_end - t_dispatch_start,
-  #            'Dispatch End Time': t_dispatch_end,
-  #            'Combine Start Time': t_combine_start,
-  #            'Time in Combine': t_combine_end - t_combine_start,
-  #            'FFN End Time': t_end})
+  wandb.log({'MOE Start Time': t_start,
+             'Time in Dispatch': t_dispatch_end - t_dispatch_start,
+             'Dispatch End Time': t_dispatch_end,
+             'Combine Start Time': t_combine_start,
+             'Time in Combine': t_combine_end - t_combine_start,
+             'MOE End Time': t_end})
 
   tf.logging.info('################################################')
-  tf.logging.info('End time for moe')
-  tf.logging.info(t_end)
-  tf.logging.info('Time spent')
-  tf.logging.info(t_end - t_start)
-  tf.logging.info('Time in dispatch')
-  tf.logging.info(t_dispatch_end - t_dispatch_start)
+  tf.logging.info('MOE Start Time: %d', t_start)
+  tf.logging.info('Time in Dispatch: %d', t_dispatch_end - t_dispatch_start)
+  tf.logging.info('Dispatch End Time: %d', t_dispatch_end)
+  tf.logging.info('Combine Start Time: %d', t_combine_start)
+  tf.logging.info('Time in Combine: %d', t_combine_end - t_combine_start)
+  tf.logging.info('MOE End Time: %d', t_end)
+  tf.logging.info('################################################')
+  
   return outputs, aux_loss
 
 
