@@ -699,6 +699,13 @@ class BaseInputGenerator(base_layer.BaseLayer):
     # Get enqueue data for each replica.
     for key in tpu_emb_input_keys:
       feat = input_batch.GetItem(key)
+      config = tpu_embedding.feature_to_config_dict[key]
+      if (config.max_sequence_length > 0 and
+          feat.shape[1] != config.max_sequence_length):
+        raise ValueError(
+            'TPU embedding input ids shape mismatch. Expecting '
+            f'(None, {config.max_sequence_length}), got {feat.shape}')
+
       if isinstance(feat, tf.sparse.SparseTensor):
         tpu_emb_feat_splitted = tf.sparse.split(feat, num_splits, axis=0)
         for i, split in enumerate(tpu_emb_feat_splitted):
@@ -730,6 +737,11 @@ class BaseInputGenerator(base_layer.BaseLayer):
       if cpu_passthrough:
         self.CreateCpuPassthroughEnqueueOps()
       self.CreateTpuEmbeddingEnqueueOps()
+
+  def DeviceLoopSetupInTF2(self):
+    """Set up device-loop-level params."""
+    assert py_utils.IsEagerMode(
+    ), 'This function can only be called in TF2 mode.'
 
   def PreprocessTpuEmbeddingInputBatch(self, input_batch):
     """Hook to manipulate the TPU embedding input batch.

@@ -806,12 +806,6 @@ class BaseTask(base_layer.BaseLayer):
           'undefined.')
     self._graphs_applied_ema.add(graph)
 
-    # If self.vars are already EMA variables loaded from checkpoint, we don't
-    # apply EMA again. This happens when we run CPU-based Evaler/Decoder or
-    # export inference graph with EMA enabled.
-    if self.params.is_inference or (self.do_eval and not py_utils.use_tpu()):
-      return
-
     tf.logging.info('ApplyExponentialMovingAverage on %s', self)
     all_vars = _VariablesForEMA(self.params, self.vars.Flatten())
     with tf.name_scope('moving_average'):
@@ -1141,10 +1135,10 @@ class BaseModel(base_layer.BaseLayer):
   def ConstructFPropBPropGraph(self):
     raise NotImplementedError('Abstract method')
 
-  def ConstructFPropGraph(self):
+  def ConstructFPropGraph(self, apply_ema=False):
     raise NotImplementedError('Abstract method')
 
-  def ConstructDecodeGraph(self):
+  def ConstructDecodeGraph(self, task_name=None, apply_ema=False):
     raise NotImplementedError('Abstract method')
 
   def ConstructPostTrainingLoop(self, outfeed=None):
@@ -1238,13 +1232,13 @@ class SingleTaskBase(BaseModel):
     tf.logging.info('Backward Propagation')
     self._task.BProp()
 
-  def ConstructFPropGraph(self):
-    if self.ema:
+  def ConstructFPropGraph(self, apply_ema=False):
+    if self.ema and apply_ema:
       self._task.ApplyExponentialMovingAverage(self.ema)
     self._task.FPropDefaultTheta()
 
-  def ConstructDecodeGraph(self, task_name=None):
-    if self.ema:
+  def ConstructDecodeGraph(self, task_name=None, apply_ema=False):
+    if self.ema and apply_ema:
       self._task.ApplyExponentialMovingAverage(self.ema)
     with py_utils.TaskCallScope(self._task):
       input_batch = self._task.GetInputBatch()
@@ -1479,7 +1473,8 @@ class MultiTaskModel(BaseModel):
     if self.ema:
       self._MakeEMAVariablesDict()
 
-  def ConstructFPropGraph(self):
+  def ConstructFPropGraph(self, apply_ema=False):
+    assert not apply_ema
     for task_name in self.task_names:
       with tf.name_scope(task_name):
         task = self.GetTask(task_name)
@@ -1487,7 +1482,8 @@ class MultiTaskModel(BaseModel):
         # loaded as EMA variables, so we don't need to apply EMA.
         task.FPropDefaultTheta()
 
-  def ConstructDecodeGraph(self, task_name=None):
+  def ConstructDecodeGraph(self, task_name=None, apply_ema=False):
+    assert not apply_ema
     if not task_name:
       raise ValueError(
           'It can decode only one task at a time, but task_name is not set.')
