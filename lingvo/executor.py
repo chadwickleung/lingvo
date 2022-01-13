@@ -32,6 +32,8 @@ from lingvo.core import task_scheduler
 from lingvo.core import tpu_embedding_layers
 import numpy as np
 
+import wandb
+
 from lingvo import base_runner
 from tensorflow.python.tpu import device_assignment as device_assignment_lib  # pylint: disable=g-direct-tensorflow-import
 
@@ -466,11 +468,10 @@ class ExecutorTpu(base_runner.BaseRunner):
             disable_meta_optimizer=FLAGS.disable_meta_optimizer_in_executor)
         stack.enter_context(sess)
         sess.reset(self._tf_master)
-        # wandb.tensorflow.log(tf.summary.merge_all())
+        wandb.tensorflow.log(tf.summary.merge_all())
         config_proto = (
             self._tpu_embedding.config_proto
             if self._tpu_embedding is not None else None)
-        # Chadwick: Should log here to capture each sess runtime
         for worker in self._cluster.all_worker_names:
           sess.run(
               tf.tpu.initialize_system(

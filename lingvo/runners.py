@@ -627,6 +627,7 @@ class TrainerTpu(base_runner.BaseRunner):
 
   def _InfeedLoop(self, sess):
     tf.logging.info('_InfeedLoop start')
+    tf.logging.info('For enqueue')
     for _ in range(self._steps_per_loop):
       sess.run(self.enqueue_ops)
 
