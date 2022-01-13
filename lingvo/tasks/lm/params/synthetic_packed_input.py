@@ -75,7 +75,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
   GATED_GELU = True
   POSITIONAL_EMBEDDING = False
   USE_REPEAT_LAYER = False
-  TRAIN_STEPS_PER_LOOP = 50  # _steps_per_loop param
+  TRAIN_STEPS_PER_LOOP = 100  # _steps_per_loop param
   MOE = True
   MOE_HIDDEN_DIM = MODEL_DIM
 
@@ -142,10 +142,10 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
     p.train.learning_rate = 1.0
 
     p.train.lr_schedule = schedule.SqrtDecay.Params().Set(
-        warmup_steps=50, multiplier=1.0)
+        warmup_steps=100, multiplier=1.0)
 
-    p.train.max_steps = 100
-    p.train.save_max_to_keep = 50
+    p.train.max_steps = 200
+    p.train.save_max_to_keep = 100
 
     return p
 
@@ -175,7 +175,7 @@ class DenseLm8B2x2(DenseLmTemplate):
   SEQUENCE_LENGTH = 1024
   NUM_DEVICES_PER_SPLIT = 8  # it was 128 
   BATCH_DIM_PER_DEVICE = 0.5  # it was 0.125
-  NUM_TRANSFORMER_LAYERS = 2  # (was 4) 2 blocks of [[DecSelfAttention, MoE], [DecSelfAttention, DenseReluDense]]
+  NUM_TRANSFORMER_LAYERS = 4  # (was 4) 2 blocks of [[DecSelfAttention, MoE], [DecSelfAttention, DenseReluDense]]
   DEVICE_MESH_SHAPE = [1, 8]
   DEVICE_MESH = np.arange(8).reshape(DEVICE_MESH_SHAPE)
 
