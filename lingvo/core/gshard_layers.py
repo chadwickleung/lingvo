@@ -2251,17 +2251,14 @@ def TokenShufflingOnlogits(inputs,
     logits: G`SE Tensor.
     experts_dim: number of experts.
     fprop_dtype: activations datatype to use.
-    use_xla_sharding: bool, True if this function is used for the xla_sharding
-      case.
-    mask_dtype: using bfloat16 for fprop_dtype could be problematic for mask
-      tensors, mask_dtype is a special dtype for such tensors.
+    use_xla_sharding: True if this function is used for the xla_sharding case.
+    mask_dtype: dtype for mask tensors as bfloat16 could be problematic.
 
   Returns:
-    A tuple (combine_tensor, dispatch_tensor).
-
+    A tuple (aux_loss, combine_tensor, dispatch_tensor).
+    - aux_loss: Always 0, because we don't need an aux_loss in this method.
     - combine_tensor: G`EC Tensor for combining expert outputs.
-    - dispatch_tensor: G`ECS Tensor, scattering/dispatching inputs to
-      experts.
+    - dispatch_tensor: G`ECS Tensor, scattering/dispatching inputs to experts.
   """
   if mask_dtype is None:
     mask_dtype = fprop_dtype
@@ -2270,20 +2267,22 @@ def TokenShufflingOnlogits(inputs,
                        'within Top2GatingOnLogits are generally redundant.')
   del inputs  # inputs is currently not used.
   # logits.dtype could be tf.float32
+  # G`SE Tensor.
   scores = tf.nn.softmax(logits)  # along E dim
   scores = tf.cast(scores, tf.bfloat16)
 
   seq_len = logits.shape[1]
-  # number of ffn layers for each expert
+  # number of ffn layers for each expert.
   bucket_size = seq_len // experts_dim
 
+  # G`EC Tensors.
   gate, indices = tf.math.top_k(
       tf.transpose(scores, [0, 2, 1]), k=bucket_size, sorted=False)
   # b x num_experts(k) x bucket_size(c) x seq_len(n)
-  # GECS
+  # G`ECS Tensor.
   perm = tf.one_hot(indices, seq_len)
   perm = tf.cast(perm, tf.bfloat16)
-  return perm, gate
+  return tf.constant(0.0, dtype=tf.bfloat16), gate, perm
 
 
 def ComputeGating(w,
@@ -2380,8 +2379,7 @@ def ComputeGating(w,
   tpu_summary.tensor('top1_expert', top1_expert_per_example)
 
   if gating_func == 'token_shuffle':
-    aux_loss = 0  # We don't need an aux_loss in this method.
-    dispatch_tensor, combine_tensor = TokenShufflingOnlogits(
+    aux_loss, combine_tensor, dispatch_tensor = TokenShufflingOnlogits(
         inputs, logits, experts_dim, fprop_dtype, use_xla_sharding, mask_dtype)
   elif gating_func == 'top_2':
     aux_loss, combine_tensor, dispatch_tensor = Top2GatingOnLogits(

@@ -918,6 +918,17 @@ class Transformer(base_layer.BaseLayer):
 
   def init_states(self, theta: NestedMap, target_batch_size: int,
                   target_max_length: int) -> NestedMap:
+    """Initialize the cache for the Transformer layer.
+
+    Args:
+      theta: A `.NestedMap` object containing weights' values of this layer and
+        its children layers.
+      target_batch_size: Batch size for the target.
+      target_max_length: The length to decode the target.
+
+    Returns:
+      Initialized cache for decoding.
+    """
     return self.self_attention.init_states(theta.self_attention,
                                            target_batch_size, target_max_length)
 
@@ -1320,6 +1331,17 @@ class StackedTransformer(base_layer.BaseLayer):
 
   def init_states(self, theta: NestedMap, *args: Any,
                   **kwargs: Any) -> NestedMap:
+    """Initialize the cache for the StackedTransformer layer.
+
+    Args:
+      theta: A `.NestedMap` object containing weights' values of this layer and
+        its children layers.
+      *args: Other arguments.
+      **kwargs: Other keyword arguments.
+
+    Returns:
+      Initialized cache for decoding.
+    """
     return NestedMap(x_layers=[
         layer.init_states(layer_theta, *args, **kwargs)
         for layer, layer_theta in zip(self.x_layers, theta.x_layers)
@@ -1626,20 +1648,46 @@ class StackedTransformerRepeated(base_layer.BaseLayer):
     """
 
     def sub_fprop_fn(sub, theta, inputs, *args: Any, **kwargs: Any):
-      # sub is expected to be an instance of StackedTransformer
-      assert isinstance(sub, StackedTransformer)
-      out = sub.fprop(theta, inputs, *args, **kwargs)
-      return out, NestedMap()
+      with py_utils.AuxLossContext(reentrant=True) as al_ctx:
+        assert al_ctx is not None
+        # sub is expected to be an instance of StackedTransformer
+        assert isinstance(sub, StackedTransformer)
+        out = sub.fprop(theta, inputs, *args, **kwargs)
+
+        if al_ctx.aux_losses:
+          assert isinstance(al_ctx.aux_losses, list)
+          aux_loss_inc = sum(al_ctx.aux_losses).astype(self.fprop_dtype)
+          base_layer.add_summary('aux_loss_inc', aux_loss_inc)
+        else:
+          aux_loss_inc = jnp.array(0.0, dtype=self.fprop_dtype)
+
+        return out, NestedMap(aux_loss=aux_loss_inc)
 
     out, stacked_extra = self.repeat.fprop(sub_fprop_fn, theta.repeat, inputs,
                                            paddings, segment_mask, cross_inputs,
                                            cross_paddings, cross_segment_mask,
                                            segment_pos)
-    del stacked_extra
+    aux_loss = jnp.sum(stacked_extra.aux_loss)
+    aux_loss_ctx = py_utils.AuxLossContext.Current()
+    # Scan can not have sideeffects so we have to capture side effect
+    # "aux_loss" in the moe layer and propagate it explicitly.
+    if aux_loss_ctx is not None:
+      aux_loss_ctx.AddLoss(aux_loss)
     return out
 
   def init_states(self, theta: NestedMap, *args: Any,
                   **kwargs: Any) -> NestedMap:
+    """Initialize the cache for the StackedTransformerRepeated layer.
+
+    Args:
+      theta: A `.NestedMap` object containing weights' values of this layer and
+        its children layers.
+      *args: Other arguments.
+      **kwargs: Other keyword arguments.
+
+    Returns:
+      Initialized cache for decoding.
+    """
 
     def init_fn(block, theta, *args, **kwargs):
       assert isinstance(block, StackedTransformer)
@@ -1783,9 +1831,14 @@ class TransformerLm(base_layer.BaseLayer):
 
     # We assume activation batch is split on both replica_axis and data_axis.
     batch_split = (replica_axis, data_axis)
-    # Softmax weight is of shape [input_dim, vocab_size].
     softmax_p = lm_p.softmax_tpl
-    softmax_p.weight_split_dims_mapping.wt = [data_axis, mdl_axis]
+    if isinstance(softmax_p.cls,
+                  embedding_softmax.GShardSharedEmebeddingSoftmax):
+      # Softmax weight is of shape [vocab_size, input_dim].
+      softmax_p.weight_split_dims_mapping.wt = [mdl_axis, data_axis]
+    else:
+      # Softmax weight is of shape [input_dim, vocab_size].
+      softmax_p.weight_split_dims_mapping.wt = [data_axis, mdl_axis]
 
     pos_emb_p = lm_p.position_emb_tpl
     pos_emb_p.weight_split_dims_mapping.wt = [data_axis, mdl_axis]
