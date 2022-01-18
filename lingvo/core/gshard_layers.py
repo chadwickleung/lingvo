@@ -2605,14 +2605,23 @@ def FeedForwardNetworksApplyGating(gating,
              'Time in Combine': t_combine_end - t_combine_start,
              'MOE End Time': t_end})
 
-  tf.logging.info('################################################')
-  tf.logging.info('MOE Start Time: %.7f', t_start)
-  tf.logging.info('Time in Dispatch: %.7f', t_dispatch_end - t_dispatch_start)
-  tf.logging.info('Dispatch End Time: %.7f', t_dispatch_end)
-  tf.logging.info('Combine Start Time: %.7f', t_combine_start)
-  tf.logging.info('Time in Combine: %.7f', t_combine_end - t_combine_start)
-  tf.logging.info('MOE End Time: %.7f', t_end)
-  tf.logging.info('################################################')
+  # tf.logging.info('################################################')
+  # tf.logging.info('MOE Start Time: %.7f', t_start)
+  # tf.logging.info('Time in Dispatch: %.7f', t_dispatch_end - t_dispatch_start)
+  # tf.logging.info('Dispatch End Time: %.7f', t_dispatch_end)
+  # tf.logging.info('Combine Start Time: %.7f', t_combine_start)
+  # tf.logging.info('Time in Combine: %.7f', t_combine_end - t_combine_start)
+  # tf.logging.info('MOE End Time: %.7f', t_end)
+  # tf.logging.info('################################################')
+
+  tf.print('################################################')
+  tf.print('MOE Start Time: %.7f', t_start)
+  tf.print('Time in Dispatch: %.7f', t_dispatch_end - t_dispatch_start)
+  tf.print('Dispatch End Time: %.7f', t_dispatch_end)
+  tf.print('Combine Start Time: %.7f', t_combine_start)
+  tf.print('Time in Combine: %.7f', t_combine_end - t_combine_start)
+  tf.print('MOE End Time: %.7f', t_end)
+  tf.print('################################################')
   
   return outputs, aux_loss
 
