@@ -853,9 +853,6 @@ class RunnerManager:
       self.RunEvalerOnce()
       return
 
-    self.RunEvalerOnce()
-    return
-
     self.StartRunners(self.CreateRunners(FLAGS.job.split(','), FLAGS.logdir))
 
 
