@@ -1548,9 +1548,6 @@ def GetFanInFanOut(shape, prefix_dims_to_skip):
     return fan_in, fan_out
 
 
-_VARIABLE_STORE_STACK = ThreadLocalStack()
-
-
 @contextlib.contextmanager
 def VariableStore(default_store=None):
   """Keeps track of {variable_name: (variable, var_params)}.
@@ -1573,20 +1570,24 @@ def VariableStore(default_store=None):
   Yields:
     A dictionary representing the variable store.
   """
-  if _VARIABLE_STORE_STACK.stack:
-    store = _VARIABLE_STORE_STACK.stack[-1]
-  else:
-    store = default_store or {}
-  _VARIABLE_STORE_STACK.stack.append(store)
-  try:
-    yield store
-  finally:
-    _VARIABLE_STORE_STACK.stack.pop()
+  old_store = _GetVariableStore()
+  default_store = default_store or {}
+  store = old_store if old_store is not None else default_store
+  graph = tf.get_default_graph()
+  while hasattr(graph, 'outer_graph') and graph.outer_graph:
+    graph = graph.outer_graph
+  graph.lingvo_variable_store = store
+  yield store
+  graph.lingvo_variable_store = old_store
 
 
 def _GetVariableStore():
-  return (_VARIABLE_STORE_STACK.stack[-1]
-          if _VARIABLE_STORE_STACK.stack else None)
+  graph = tf.get_default_graph()
+  while hasattr(graph, 'outer_graph') and graph.outer_graph:
+    graph = graph.outer_graph
+  if hasattr(graph, 'lingvo_variable_store'):
+    return graph.lingvo_variable_store
+  return None
 
 
 def _DefaultVariableCreator(**kwargs):
@@ -1600,6 +1601,7 @@ _VARIABLE_CREATOR_STACK = ThreadLocalStack()
 
 def _GetVariableCreator():
   fn = _DefaultVariableCreator
+  # Latest entry in _VARIABLE_CREATOR_STACK is called last.
   for wrapper in reversed(_VARIABLE_CREATOR_STACK.stack):
     fn = functools.partial(wrapper, fn)
   return fn
@@ -1679,15 +1681,21 @@ def MaybeReuseFromVariableStore(next_creator, **kwargs):
   var_name = kwargs['var_name']
   p = kwargs['var_params']
   store = _GetVariableStore()
-  if store is not None and var_name in store:
-    if tf.get_variable_scope().reuse:
-      var, cached_p = store[var_name]
-      tf.logging.info('Reusing var %s', var.name)
-      assert cached_p == p.ToText(), (
-          'Cached config:\n %s vs new config:\n %s' % (cached_p, p.ToText()))
-      return var
+  if store is not None:
+    if var_name in store:
+      if tf.get_variable_scope().reuse:
+        var, cached_p = store[var_name]
+        tf.logging.info('Reusing var %s', var.name)
+        assert cached_p == p.ToText(), (
+            'Cached config:\n %s vs new config:\n %s' % (cached_p, p.ToText()))
+        return var
 
   var = next_creator(**kwargs)
+  if var.name != f'{var_name}/var:0':
+    raise ValueError(
+        'Expected %s but created variable %s. Did you mean to set reuse=True '
+        'or reuse=tf.AUTO_REUSE in VarScope, or did not create a '
+        'VariableStore for variable reuse?' % (f'{var_name}/var:0', var.name))
   tf.logging.info('Creating var %s shape=%s on device %s', var.name, var.shape,
                   var.device)
   for col in p.collections:
@@ -1709,6 +1717,25 @@ def MaybeOpportunisticVariableReuse(next_creator, **kwargs):
     with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
       return next_creator(**kwargs)
   return next_creator(**kwargs)
+
+
+def GetLingvoVariableCreator(name, var_name):
+  """Returns a variable creator function."""
+
+  def LingvoVariableCreator(next_creator, **kwargs):
+    """Lingvo variable creator."""
+    # TODO(yonghui): Possibly get away from variable_scope and implement our own
+    # variable sharing mechanism.
+    with tf.variable_scope(name) as scope:
+      var_scope = tf.VariableScope(
+          scope.reuse,
+          custom_getter=scope.custom_getter,
+          caching_device=scope.caching_device,
+          use_resource=True)
+    with tf.variable_scope(var_scope), tf.variable_scope(var_name):
+      return next_creator(**kwargs)
+
+  return LingvoVariableCreator
 
 
 # TODO(yonghui): Add support for partitioned Variables.
@@ -1827,12 +1854,12 @@ def _CreateVariableStateful(name,
 
     def ComplexWrapper(init):
 
-      def _Wrapper(shape, dtype, partition_info):
+      def _Wrapper(shape, dtype):
         del dtype
         # A more complex alternative may be to use the init function for
         # magnitudes and uniform random for phases instead.
         shape = [2] + shape
-        value = init(shape, init_dtype, partition_info)
+        value = init(shape, init_dtype)
         return tf.complex(value[0], value[1])
 
       return _Wrapper
@@ -1843,9 +1870,9 @@ def _CreateVariableStateful(name,
 
     def FloatToInt8Wrapper(init):
 
-      def _Wrapper(shape, dtype, partition_info):
+      def _Wrapper(shape, dtype):
         del dtype
-        value = init(shape, init_dtype, partition_info)
+        value = init(shape, init_dtype)
         scale = tf.math.maximum(
             tf.math.reduce_min(value) / -127,
             tf.math.reduce_max(value) / 127)
@@ -1856,21 +1883,15 @@ def _CreateVariableStateful(name,
 
     v_init = FloatToInt8Wrapper(v_init)
 
-  def LingvoVariableCreator(next_creator, **kwargs):
-    """Lingvo variable creator."""
-    # TODO(yonghui): Possibly get away from variable_scope and implement our own
-    # variable sharing mechanism.
-    with tf.variable_scope(name) as scope:
-      var_scope = tf.VariableScope(
-          scope.reuse,
-          custom_getter=scope.custom_getter,
-          caching_device=scope.caching_device,
-          use_resource=True)
-    with tf.variable_scope(var_scope), tf.variable_scope(var_name):
-      return next_creator(**kwargs)
+  if collections is None:
+    collections = []
+  # tf.Variable() does not have a "collections" arg that tf.get_variable() has.
+  # So instead add the passed collections into p.collections so that
+  # MaybeReuseFromVariableStore will add the variable to the collections.
+  p.collections = list(set(p.collections) | set(collections))
 
   with contextlib.ExitStack() as context_stack:
-    for variable_creator_fn in (LingvoVariableCreator,
+    for variable_creator_fn in (GetLingvoVariableCreator(name, var_name),
                                 MaybeOpportunisticVariableReuse,
                                 MaybePinVarsToCpu, MaybeReuseFromVariableStore):
       context_stack.enter_context(VariableCreatorScope(variable_creator_fn))
@@ -1885,7 +1906,6 @@ def _CreateVariableStateful(name,
         shape=call_shape,
         dtype=var_dtype,
         initializer=v_init,
-        collections=collections,
         trainable=trainable,
         validate_shape=True,
         synchronization=synchronization,
@@ -1974,21 +1994,15 @@ def _CreateVariableStateless(name,
     raise TypeError(
         'Stateless variable initialization does not support tf.complex64.')
 
-  def LingvoVariableCreator(next_creator, **kwargs):
-    """Lingvo variable creator."""
-    # TODO(yonghui): Possibly get away from variable_scope and implement our own
-    # variable sharing mechanism.
-    with tf.variable_scope(name) as scope:
-      var_scope = tf.VariableScope(
-          scope.reuse,
-          custom_getter=scope.custom_getter,
-          caching_device=scope.caching_device,
-          use_resource=True)
-    with tf.variable_scope(var_scope), tf.variable_scope(var_name):
-      return next_creator(**kwargs)
+  if collections is None:
+    collections = []
+  # tf.Variable() does not have a "collections" arg that tf.get_variable() has.
+  # So instead add the passed collections into p.collections so that
+  # MaybeReuseFromVariableStore will add the variable to the collections.
+  p.collections = list(set(p.collections) | set(collections))
 
   with contextlib.ExitStack() as context_stack:
-    for variable_creator_fn in (LingvoVariableCreator,
+    for variable_creator_fn in (GetLingvoVariableCreator(name, var_name),
                                 MaybeOpportunisticVariableReuse,
                                 MaybeReuseFromVariableStore):
       context_stack.enter_context(VariableCreatorScope(variable_creator_fn))
@@ -1999,7 +2013,6 @@ def _CreateVariableStateless(name,
         shape=GetVariableShapePrefixes() + list(shape),
         dtype=var_dtype,
         initializer=v_init,
-        collections=collections,
         trainable=trainable,
         validate_shape=True,
         synchronization=synchronization,
@@ -2029,9 +2042,8 @@ def _RandomXavierUniformInitializer(method, scale, seed):
   """Creates a random Xavier uniform initializer."""
   combined_layers_dims = GetVariableNumLeadingDimsForCombinedLayersContext()
 
-  def XavierUniform(shape, dtype, partition_info):
+  def XavierUniform(shape, dtype):
     """Xavier initialization (x = sqrt(6. / (in + out)); scale*[-x, x])."""
-    del partition_info  # Unused.
     if not shape:
       raise ValueError('\'shape\' must not be \'None\' or 0 for XavierUniform')
     fan_in, fan_out = GetFanInFanOut(shape, combined_layers_dims)
@@ -2115,9 +2127,8 @@ def _CreateVarInitStateful(name,
     v_init = init_ops.constant_initializer(value=scale, dtype=init_dtype)
   elif method in ['xavier', 'geo_mean_xavier']:
 
-    def XavierUniform(shape, dtype, partition_info):
+    def XavierUniform(shape, dtype):
       """Xavier initialization (x = sqrt(6. / (in + out)); scale*[-x, x])."""
-      del partition_info  # Unused.
       if not shape:
         raise ValueError(
             '\'shape\' must not be \'None\' or 0 for XavierUniform')
@@ -2175,8 +2186,7 @@ def _GenerateStatelessRngSeed(name, seed):
 def _DeterministicRandomNormalInitializer(seed, mean, stddev):
   """Creates a random normal initializer."""
 
-  def DeterministicNormal(shape, dtype, partition_info):
-    del partition_info  # Unused.
+  def DeterministicNormal(shape, dtype):
     return stateless_random_ops.stateless_random_normal(
         shape=shape, seed=seed, mean=mean, stddev=stddev, dtype=dtype)
 
@@ -2186,8 +2196,7 @@ def _DeterministicRandomNormalInitializer(seed, mean, stddev):
 def _DeterministicRandomUniformInitializer(seed, minval, maxval):
   """Creates a random uniform initializer."""
 
-  def DeterministicUniform(shape, dtype, partition_info):
-    del partition_info  # Unused.
+  def DeterministicUniform(shape, dtype):
     return stateless_random_ops.stateless_random_uniform(
         shape=shape, seed=seed, minval=minval, maxval=maxval, dtype=dtype)
 
@@ -2197,8 +2206,7 @@ def _DeterministicRandomUniformInitializer(seed, minval, maxval):
 def _DeterministicRandomTruncatedNormalInitializer(seed, mean, stddev):
   """Creates a random truncated normal initializer."""
 
-  def DeterministicTruncatedNormal(shape, dtype, partition_info):
-    del partition_info  # Unused.
+  def DeterministicTruncatedNormal(shape, dtype):
     return stateless_random_ops.stateless_truncated_normal(
         shape=shape, seed=seed, mean=mean, stddev=stddev, dtype=dtype)
 
@@ -2208,12 +2216,10 @@ def _DeterministicRandomTruncatedNormalInitializer(seed, mean, stddev):
 def _DeterministicRandomUniformUnitScalingInitializer(seed, factor):
   """Creates a random uniform unit scaling initializer."""
 
-  def DeterministicUniformUnitScaling(shape, dtype, partition_info):
+  def DeterministicUniformUnitScaling(shape, dtype):
     # The following logic is originally from (UniformUnitScaling.__call__())
     # in TensorFlow: python/ops/init_ops.py
     scale_shape = shape
-    if partition_info is not None:
-      scale_shape = partition_info.full_shape
 
     input_size = 1.0
     # Estimating input size is not possible to do perfectly, but we try.
@@ -2246,11 +2252,9 @@ def _DeterministicRandomVarianceScalingInitializer(scale, mode, distribution,
 
   combined_layers_dims = GetVariableNumLeadingDimsForCombinedLayersContext()
 
-  def DeterministicVarianceScaling(shape, dtype, partition_info):
+  def DeterministicVarianceScaling(shape, dtype):
     # This is originally from TensorFlow: python/ops/init_ops.py
     scale_shape = shape
-    if partition_info is not None:
-      scale_shape = partition_info.full_shape
     # Handle special case of empty list as shape, since fan_in and fan_out
     # are numerically added below. Without this, GetFanInFanOut() would
     # return None, None instead.
@@ -2286,9 +2290,8 @@ def _DeterministicRandomXavierUniformInitializer(method, scale, seed):
   """Creates a variance scaling initializer."""
   combined_layers_dims = GetVariableNumLeadingDimsForCombinedLayersContext()
 
-  def XavierUniform(shape, dtype, partition_info):
+  def XavierUniform(shape, dtype):
     """Xavier initialization (x = sqrt(6. / (in + out)); scale*[-x, x])."""
-    del partition_info  # Unused.
     if not shape:
       raise ValueError('\'shape\' must not be \'None\' or 0 for XavierUniform')
     fan_in, fan_out = GetFanInFanOut(shape, combined_layers_dims)
@@ -2939,12 +2942,12 @@ def ComputeGradients(
   # This doesn't work if the training loop is wrapped inside a tf.function,
   # since all variables will be lifted out and trainable_variables will be
   # empty. In that case we skip the check.
-  trainable_variables = set(tf.trainable_variables())
+  trainable_variables = set([v.ref() for v in tf.trainable_variables()])
   if trainable_variables:
 
     def Needed(v):
       if isinstance(v, tf.Variable):
-        if v not in trainable_variables:
+        if v.ref() not in trainable_variables:
           # Skip non-trainable variables. Otherwise,
           # tf.Optimizer.apply_gradients throws up an exception instead
           # of skipping the update.
