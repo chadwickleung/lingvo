@@ -2401,7 +2401,8 @@ def ComputeGating(w,
              'Time in Gate Einsum': t_gate_einsum_end - t_gate_einsum_start,
              'Compute Top-2 Gating End Time': t_end})
 
-
+  # See the difference between these 3
+  tf.logging.info('Gate Einsum time: %.7f', t_gate_einsum_end - t_gate_einsum_start)
   tf.print('Time in Gate Einsum: %.7f', t_gate_einsum_end - t_gate_einsum_start)
   tf.Print('Time in Gate Einsum: %.7f', t_gate_einsum_end - t_gate_einsum_start)
 
