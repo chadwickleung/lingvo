@@ -2404,7 +2404,7 @@ def ComputeGating(w,
   # See the difference between these 3
   tf.logging.info('Gate Einsum time: %.7f', t_gate_einsum_end - t_gate_einsum_start)
   tf.print('Time in Gate Einsum: %.7f', t_gate_einsum_end - t_gate_einsum_start)
-  tf.Print('Time in Gate Einsum: %.7f', t_gate_einsum_end - t_gate_einsum_start)
+  # tf.Print('Time in Gate Einsum: %.7f', t_gate_einsum_end - t_gate_einsum_start)
 
   return py_utils.NestedMap(
       combine_tensor=combine_tensor,
@@ -2619,14 +2619,14 @@ def FeedForwardNetworksApplyGating(gating,
   # tf.logging.info('MOE End Time: %.7f', t_end)
   # tf.logging.info('################################################')
 
-  tf.Print('################################################')
-  tf.Print('MOE Start Time: %.7f', t_start)
-  tf.Print('Time in Dispatch: %.7f', t_dispatch_end - t_dispatch_start)
-  tf.Print('Dispatch End Time: %.7f', t_dispatch_end)
-  tf.Print('Combine Start Time: %.7f', t_combine_start)
-  tf.Print('Time in Combine: %.7f', t_combine_end - t_combine_start)
-  tf.Print('MOE End Time: %.7f', t_end)
-  tf.Print('################################################')
+  # tf.Print('################################################')
+  # tf.Print('MOE Start Time: %.7f', t_start)
+  # tf.Print('Time in Dispatch: %.7f', t_dispatch_end - t_dispatch_start)
+  # tf.Print('Dispatch End Time: %.7f', t_dispatch_end)
+  # tf.Print('Combine Start Time: %.7f', t_combine_start)
+  # tf.Print('Time in Combine: %.7f', t_combine_end - t_combine_start)
+  # tf.Print('MOE End Time: %.7f', t_end)
+  # tf.Print('################################################')
   
   return outputs, aux_loss
 
