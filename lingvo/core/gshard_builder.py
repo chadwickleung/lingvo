@@ -3264,21 +3264,11 @@ class UniTransformer(base_model.BaseTask):
       assert not p.gated_ffn_activation, p.gated_ffn_activation
       gated_ffn_activation = None
 
-<<<<<<< HEAD
-    # tf.logging.info('################First call to Embedding################')
-    dec_emb = b.Embedding('dec_emb', tgt_vocab_size)
-    self.CreateChild('dec_emb', dec_emb)
-
-    # Confirmed: p.positional_embedding == FALSE
-    if p.positional_embedding:
-      tf.logging.info('################positional_embedding == TRUE################')
-      dec_pos_emb = b.Embedding('dec_pos_emb', p.max_length)
-      self.CreateChild('dec_pos_emb', dec_pos_emb)
-=======
     if p.has_embedding_layer:
       dec_emb = b.Embedding('dec_emb', tgt_vocab_size)
       self.CreateChild('dec_emb', dec_emb)
 
+      # Confirmed: p.positional_embedding == FALSE
       if p.positional_embedding:
         dec_pos_emb = b.Embedding('dec_pos_emb', p.max_length)
         self.CreateChild('dec_pos_emb', dec_pos_emb)
@@ -3289,7 +3279,6 @@ class UniTransformer(base_model.BaseTask):
       assert p.start_layer_id == 0
       assert p.has_embedding_layer
       assert p.has_final_layer
->>>>>>> 34b21ee54865362e43b7b0732bcf344d3d348ca6
 
     # Confirmed: p.parallel_ffn == FALSE
     if p.parallel_ffn:  # Only works with RecurrentDenseBuilderParallelDecode.
