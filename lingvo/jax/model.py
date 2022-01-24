@@ -98,6 +98,7 @@ def greedy_decode(extend_step_fn: Callable[[NestedMap, JTensor],
                   target_ids: JTensor,
                   target_paddings: JTensor,
                   seq_len: int,
+                  max_decode_steps: Optional[int] = None,
                   prefix_lengths: Optional[JTensor] = None,
                   eos_id: Optional[int] = None) -> NestedMap:
   """Greedy decode the input batch.
@@ -113,7 +114,11 @@ def greedy_decode(extend_step_fn: Callable[[NestedMap, JTensor],
     target_ids: The token ids that correspond to the target sequence.
     target_paddings: The paddings corresponding to the target sequence, with a 1
       denoting padding token and 0 denoting non-padding tokens.
-    seq_len: Sequence length to decode to.
+    seq_len: The output sequence length to decode to.
+    max_decode_steps: Python int or None, the max decode step to run after
+      the prefix (if any). Since the prefixes might be of unequal lengths, this
+      value is not equivalent with `seq_len` above. When None, decode steps is
+      only limited by `seq_len` above.
     prefix_lengths: Optional argument supplying a prefix sizes to initialize the
       model to decode from a certain target prefix for each position in the
       batch. This can either be None or a JTensor of shape [batch] signifying
@@ -122,13 +127,16 @@ def greedy_decode(extend_step_fn: Callable[[NestedMap, JTensor],
 
   Returns:
     A NestedMap with `.prefix_lengths` (indicating the lengths of prefixes for
-    each target sequence), and `.output_ids` (matrix of int ids with the
-    decoded output).
+    each target sequence), `.output_ids` (matrix of int ids with the
+    decoded output), `.decode_lengths` (vector of ints indicating the lengths
+    of non-padding tokens in `.output_ids`, which includes the prefix), and
+    `.logprobs` (the log probability of selected tokens, including the prefix,
+    where a positive value of 1.0 is used to indicate padded positions).
   """
   if seq_len <= 0:
     raise ValueError('The sequence length for decoding must be > 0, '
                      f'current value = {seq_len}.')
-
+  max_decode_steps = max_decode_steps or seq_len
   batch_size = target_ids.shape[0]
 
   # If prefix length is not specified set it to 0.
@@ -145,6 +153,8 @@ def greedy_decode(extend_step_fn: Callable[[NestedMap, JTensor],
   # Shape [batch_size], whether each row has terminated and should stop.
   val.done = jnp.zeros(shape=batch_size, dtype=jnp.bool_)
   val.decode_lengths = jnp.ones_like(prefix_lengths) * seq_len
+  # We use a positive value of 1.0 to indicate blank or padded positions.
+  val.logprobs = jnp.ones_like(output_ids, dtype=jnp.float32)
 
   def cond_func(val):
     """Whether the while loop should continue."""
@@ -159,22 +169,31 @@ def greedy_decode(extend_step_fn: Callable[[NestedMap, JTensor],
     """From ids at `step`, update output ids at `step + 1`."""
     step = val.step
     decoder_state, logits = extend_step_fn(val.state, val.output_ids[:, step])
+    logprobs = jax.nn.log_softmax(logits.astype(jnp.float32))
     val.state = decoder_state
     # When step becomes prefix_length - 1, the new output has index beyond
     # the known prefix.
     # If prefix_length is 0, the condition is always False, so we take the
-    # decoded output rather than the gold target.
+    # decoded output rather than the prefix.
     new_ids = jnp.where(step < prefix_lengths - 1, target_ids[:, step + 1],
                         jnp.argmax(logits, axis=1))
     prev_done = val.done
     new_ids = jnp.where(prev_done, jnp.zeros_like(new_ids), new_ids)
     if eos_id is not None:
       val.done = jnp.logical_or(prev_done, jnp.equal(new_ids, eos_id))
+    max_decoding_steps_reached = (jnp.ones_like(prefix_lengths) * (step + 2) -
+                                  prefix_lengths) >= max_decode_steps
+    val.done = jnp.logical_or(val.done, max_decoding_steps_reached)
     done_at_this_step = jnp.logical_and(jnp.logical_not(prev_done), val.done)
     val.decode_lengths = jnp.where(
         done_at_this_step,
         jnp.ones_like(val.decode_lengths) * (step + 2), val.decode_lengths)
     val.output_ids = val.output_ids.at[:, step + 1].set(new_ids)
+    logprobs_at_new_ids = logprobs.at[jnp.arange(batch_size), new_ids].get()
+    logprobs_at_new_ids = jnp.where(prev_done,
+                                    jnp.ones_like(logprobs_at_new_ids),
+                                    logprobs_at_new_ids)
+    val.logprobs = val.logprobs.at[:, step + 1].set(logprobs_at_new_ids)
     val.step += 1
     return val
 
@@ -320,7 +339,8 @@ class BaseTask(base_layer.BaseLayer):
     predictions = self.compute_predictions(theta, input_batch)
     return self.compute_loss(theta, predictions, input_batch)
 
-  def decode(self, theta: NestedMap, input_batch: NestedMap) -> NestedMap:
+  def decode(self, theta: NestedMap,
+             input_batch: NestedMap) -> Tuple[NestedMap, NestedMap]:
     """Decodes input_batch with model weights 'theta'.
 
     Args:
@@ -329,12 +349,15 @@ class BaseTask(base_layer.BaseLayer):
         spiltting is used, a list of `NestedMap`, one for each split.
 
     Returns:
-      A `.NestedMap` as decoder output.
+      - metrics, a NestedMap containing str keys and (metric, weight) pairs for
+        the current batch (a tuple of two scalars).
+      - results, a `.NestedMap` as decoder output.
     """
     raise NotImplementedError('Abstract method')
 
-  def process_decode_out(self, input_obj: base_input.BaseInput,
-                         decode_out: NestedMap) -> Sequence[Tuple[str, Any]]:
+  def process_decode_out(
+      self, input_obj: base_input.BaseInput,
+      decode_out: NestedMap) -> Tuple[NestedMap, Sequence[Tuple[str, Any]]]:
     """Processes one batch of decoded outputs.
 
     Args:
@@ -342,8 +365,10 @@ class BaseTask(base_layer.BaseLayer):
       decode_out: The output from decode(). May have an extra leading axis.
 
     Returns:
-      A list of tuples where each element corresponds to a row in the batch.
-      Each tuple is a key value pair.
+      - metrics, a NestedMap containing str keys and (metric, weight) pairs for
+        the current batch (a tuple of two scalars).
+      - A list of tuples where each element corresponds to a row in the batch.
+        Each tuple is a key value pair.
     """
     raise NotImplementedError('Abstract method')
 
@@ -435,6 +460,10 @@ class LanguageModel(BaseTask):
     greedy_search_p.Define(
         'eos_id', 2,
         'The id of EOS token indicating the termination of greedy search.')
+    greedy_search_p.Define(
+        'max_decode_steps', None,
+        'If not None, the max decode steps for each example. If None, this '
+        'is set to `seqlen`, which contains prefix.')
     p.Define('decoder', greedy_search_p, 'Decoder param.')
     return p
 
@@ -487,7 +516,8 @@ class LanguageModel(BaseTask):
     return compute_xent_loss_helper(predictions, input_batch,
                                     self.params.return_predictions)
 
-  def decode(self, theta: NestedMap, input_batch: NestedMap) -> NestedMap:
+  def decode(self, theta: NestedMap,
+             input_batch: NestedMap) -> Tuple[NestedMap, NestedMap]:
     """Greedy decodes the input_batch with model weights 'theta'.
 
     Args:
@@ -495,9 +525,10 @@ class LanguageModel(BaseTask):
       input_batch: The input batch, with fields like `.ids`.
 
     Returns:
-      A NestedMap like `input_batch`, with `.prefix_lengths` (vector of
-      randomly generated ints indicating the lengths of prefixes for each
-      row), and `.output_ids` (matrix of int ids with the decoded output).
+      - metrics, a NestedMap containing str keys and (metrics, weight) pairs.
+      - A NestedMap like `input_batch`, with `.prefix_lengths` (vector of
+        randomly generated ints indicating the lengths of prefixes for each
+        row), and `.output_ids` (matrix of int ids with the decoded output).
     """
     p = self.params
     if p.decoder.seqlen <= 0:
@@ -524,13 +555,19 @@ class LanguageModel(BaseTask):
         input_batch.ids,
         input_batch.paddings,
         p.decoder.seqlen,
+        max_decode_steps=p.decoder.max_decode_steps,
         prefix_lengths=prefix_lengths,
         eos_id=p.decoder.eos_id)
     result.update(input_batch)
-    return result
 
-  def process_decode_out(self, input_obj: base_input.BaseInput,
-                         decode_out: NestedMap) -> Sequence[Tuple[str, Any]]:
+    metrics = NestedMap(
+        num_decoded=(jnp.array(0.0, jnp.float32),
+                     jnp.array(batch_size, jnp.float32)))
+    return metrics, result
+
+  def process_decode_out(
+      self, input_obj: base_input.BaseInput,
+      decode_out: NestedMap) -> Tuple[NestedMap, Sequence[Tuple[str, Any]]]:
     """Processes one batch of decoded outputs.
 
     Args:
@@ -538,8 +575,10 @@ class LanguageModel(BaseTask):
       decode_out: The output from decode(). May have an extra leading axis.
 
     Returns:
-      A dict where each entry corresponds to a row in the batch. The keys should
-      be unique across the entire decode dataset.
+      - metrics, a NestedMap containing str keys and (metric, weight) pairs for
+        the current batch (a tuple of two scalars).
+      - A list of dict where each entry corresponds to a row in the batch. The
+        keys should be unique across the entire decode dataset.
     """
     decoded_strs = input_obj.ids_to_strings(decode_out.output_ids,
                                             decode_out.decode_lengths)
@@ -553,8 +592,15 @@ class LanguageModel(BaseTask):
           'prefix': prefix_strs[idx],
           'decoded': decoded_str,
           'original': original_strs[idx],
+          'ids': decode_out.output_ids[idx],
+          'logprobs': decode_out.logprobs[idx],
+          'prefix_length': decode_out.prefix_lengths[idx],
+          'decode_length': decode_out.decode_lengths[idx],
       }))
-    return ret
+    decoded_lengths = jnp.average(decode_out.decode_lengths).astype(jnp.float32)
+    metrics = NestedMap(
+        decoded_length=(decoded_lengths, jnp.array(1.0, jnp.float32)))
+    return metrics, ret
 
 
 class SequenceModel(BaseTask):
@@ -626,7 +672,8 @@ class SequenceModel(BaseTask):
     return compute_xent_loss_helper(predictions, input_batch.tgt,
                                     self.params.return_predictions)
 
-  def decode(self, theta: NestedMap, input_batch: NestedMap) -> NestedMap:
+  def decode(self, theta: NestedMap,
+             input_batch: NestedMap) -> Tuple[NestedMap, NestedMap]:
     """Decodes input_batch with model weights 'theta'.
 
     Args:
@@ -635,8 +682,9 @@ class SequenceModel(BaseTask):
         to source and target, which itself contains the `.ids` and `.paddings.`
 
     Returns:
-      A NestedMap like `input_batch`, with `.output_ids` (matrix of int ids
-        with the decoded output) as well as the decoded length.
+      - metrics, a nestedmap of metrics.
+      - results, a NestedMap like `input_batch`, with `.output_ids` (matrix of
+        int ids with the decoded output) as well as the decoded length.
     """
     p = self.params
     if p.decoder.seqlen <= 0:
@@ -664,7 +712,10 @@ class SequenceModel(BaseTask):
     # Prefix lengths are not needed for sequence model decoding.
     del result.prefix_lengths
     result.update(input_batch)
-    return result
+    metrics = NestedMap(
+        num_decoded=(jnp.array(0.0, jnp.float32),
+                     jnp.array(batch_size, jnp.float32)))
+    return metrics, result
 
   def process_decode_out(self, input_obj: base_input.BaseInput,
                          decode_out: NestedMap) -> Sequence[Tuple[str, Any]]:
@@ -704,9 +755,9 @@ class ClassificationTask(BaseTask):
   @classmethod
   def Params(cls) -> InstantiableParams:
     p = super().Params()
-    p.Define('classifier_params', layers.ResNet.Params(),
+    p.Define('network', layers.ResNet.Params(),
              'The classifier network, which is ResNet-50 by default.')
-    p.Define('softmax_params', layers.SingleShardFullSoftmax.Params(),
+    p.Define('softmax', layers.SingleShardFullSoftmax.Params(),
              'The softmax layer used for the classification.')
     p.Define(
         'input_field', 'image',
@@ -717,12 +768,8 @@ class ClassificationTask(BaseTask):
   def __init__(self, params: InstantiableParams) -> None:
     super().__init__(params)
     p = self.params
-
-    # Construct the classifier model.
-    self.create_child('network', p.classifier_params)
-
-    # Construct the softmax layer.
-    self.create_child('softmax', p.softmax_params)
+    self.create_child('network', p.network)
+    self.create_child('softmax', p.softmax)
 
   def compute_predictions(self, theta: NestedMap,
                           input_batch: NestedMap) -> Predictions:

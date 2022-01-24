@@ -41,6 +41,7 @@ pytype_strict_library(
         ":pytypes",
         # Implicit absl.flags dependency.
         # Implicit absl.logging dependency.
+        "//third_party/py/flax",
         # Implicit jax dependency.
         # Implicit numpy dependency.
         # Implicit tensorflow dependency.
@@ -123,9 +124,11 @@ pytype_strict_library(
     srcs = ["eval.py"],
     srcs_version = "PY3",
     deps = [
+        ":base_input",
         ":base_layer",
         ":base_model_params",
         ":checkpoint_py_pb2",
+        ":model",
         ":model_utils",
         ":py_utils",
         ":pytypes",
@@ -138,6 +141,7 @@ pytype_strict_library(
         "//lingvo/jax:checkpoints",
         "//lingvo/jax:io_utils",
         "//lingvo/jax:model_imports",
+        # Implicit numpy dependency.
         # Implicit tensorflow dependency.
     ],
 )
@@ -387,6 +391,7 @@ pytype_strict_library(
         # Implicit jax:mesh_utils dependency.
         "//lingvo/jax:checkpoints",
         "//lingvo/jax:model_imports",
+        # Implicit numpy dependency.
         # Implicit tensorflow dependency.
     ],
 )

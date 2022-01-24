@@ -663,9 +663,16 @@ _IS_EAGER_MODE = False
 # If you get an error "tf.enable_eager_execution must be called at program
 # startup." but you are calling this function at the start, check if your change
 # adds type hints for "tf.data" and wrap those type hints in quotes.
-def SetEagerMode(eager_mode=True):
+def SetEagerMode(eager_mode=True, test_mode=False):
+  """Switch between Eager and Graph mode. Use this instead of TF APIs."""
   global _IS_EAGER_MODE
   _IS_EAGER_MODE = eager_mode
+  # Only change the global flag.
+  # Used in tests. In those scenarios we might want to use Graph mode along with
+  # Eager mode. All we need is changing the flag `_IS_EAGER_MODE` without
+  # calling `enable_eager_execution`/`disable_eager_execution`.
+  if test_mode:
+    return
   if eager_mode:
     tf.enable_eager_execution()
     tf.config.set_soft_device_placement(True)
@@ -1308,6 +1315,18 @@ def GetOpportunisticVariableReuse():
           if _OPPORTUNISTIC_VARIABLE_REUSE.stack else False)
 
 
+_DISABLE_VARIABLE_NAME_CHECKING = ThreadLocalStack()
+
+
+@contextlib.contextmanager
+def DisableVariableNameChecking(disable=True):
+  _DISABLE_VARIABLE_NAME_CHECKING.stack.append(disable)
+  try:
+    yield
+  finally:
+    _DISABLE_VARIABLE_NAME_CHECKING.stack.pop()
+
+
 _VARIABLE_RENAME_RULES = ThreadLocalStack()
 
 # Global variable to track task calling scope.
@@ -1691,11 +1710,12 @@ def MaybeReuseFromVariableStore(next_creator, **kwargs):
         return var
 
   var = next_creator(**kwargs)
-  if var.name != f'{var_name}/var:0':
-    raise ValueError(
-        'Expected %s but created variable %s. Did you mean to set reuse=True '
-        'or reuse=tf.AUTO_REUSE in VarScope, or did not create a '
-        'VariableStore for variable reuse?' % (f'{var_name}/var:0', var.name))
+  if not _DISABLE_VARIABLE_NAME_CHECKING:
+    if var.name != f'{var_name}/var:0':
+      raise ValueError(
+          'Expected %s but created variable %s. Did you mean to set reuse=True '
+          'or reuse=tf.AUTO_REUSE in VarScope, or did not create a '
+          'VariableStore for variable reuse?' % (f'{var_name}/var:0', var.name))
   tf.logging.info('Creating var %s shape=%s on device %s', var.name, var.shape,
                   var.device)
   for col in p.collections:
@@ -1883,13 +1903,6 @@ def _CreateVariableStateful(name,
 
     v_init = FloatToInt8Wrapper(v_init)
 
-  if collections is None:
-    collections = []
-  # tf.Variable() does not have a "collections" arg that tf.get_variable() has.
-  # So instead add the passed collections into p.collections so that
-  # MaybeReuseFromVariableStore will add the variable to the collections.
-  p.collections = list(set(p.collections) | set(collections))
-
   with contextlib.ExitStack() as context_stack:
     for variable_creator_fn in (GetLingvoVariableCreator(name, var_name),
                                 MaybeOpportunisticVariableReuse,
@@ -1906,6 +1919,7 @@ def _CreateVariableStateful(name,
         shape=call_shape,
         dtype=var_dtype,
         initializer=v_init,
+        collections=collections,
         trainable=trainable,
         validate_shape=True,
         synchronization=synchronization,
@@ -1994,13 +2008,6 @@ def _CreateVariableStateless(name,
     raise TypeError(
         'Stateless variable initialization does not support tf.complex64.')
 
-  if collections is None:
-    collections = []
-  # tf.Variable() does not have a "collections" arg that tf.get_variable() has.
-  # So instead add the passed collections into p.collections so that
-  # MaybeReuseFromVariableStore will add the variable to the collections.
-  p.collections = list(set(p.collections) | set(collections))
-
   with contextlib.ExitStack() as context_stack:
     for variable_creator_fn in (GetLingvoVariableCreator(name, var_name),
                                 MaybeOpportunisticVariableReuse,
@@ -2013,6 +2020,7 @@ def _CreateVariableStateless(name,
         shape=GetVariableShapePrefixes() + list(shape),
         dtype=var_dtype,
         initializer=v_init,
+        collections=collections,
         trainable=trainable,
         validate_shape=True,
         synchronization=synchronization,
@@ -2508,8 +2516,11 @@ def CreateLocalTheta(theta, device_list=None, label=None):
   return copy
 
 
-def _GetVarsToLoad(all_vars, variable_loading_rules, var_ignore_rules,
-                   ckpt_path):
+def _GetVarsToLoad(all_vars,
+                   variable_loading_rules,
+                   var_ignore_rules,
+                   ckpt_path,
+                   suppress_logging=False):
   """Determines variables to load and their names in checkpoint."""
   # This list contains mappings from var names as they appear in the checkpoint
   # to the vars in our model they correspond to.
@@ -2523,27 +2534,31 @@ def _GetVarsToLoad(all_vars, variable_loading_rules, var_ignore_rules,
       match = re.match(regexp, model_var.name)
       # Skip if var doesn't match the loading rules, or if it should be ignored.
       if not match:
-        tf.logging.debug('Loading rules do not match %s.', model_var.name)
+        if not suppress_logging:
+          tf.logging.debug('Loading rules do not match %s.', model_var.name)
         continue
       elif any(re.match(r, model_var.name) for r in var_ignore_rules):
-        tf.logging.debug('Ignoring %s from loading.', model_var.name)
+        if not suppress_logging:
+          tf.logging.debug('Ignoring %s from loading.', model_var.name)
         continue
       checkpoint_var_name = name_format % match.groups()
       if checkpoint_var_name.endswith(':0'):
         checkpoint_var_name = checkpoint_var_name[:-2]
-      tf.logging.info('Loading %s from %s with regexp: %s', model_var.name,
-                      checkpoint_var_name, regexp)
+      if not suppress_logging:
+        tf.logging.info('Loading %s from %s with regexp: %s', model_var.name,
+                        checkpoint_var_name, regexp)
       vars_to_load.append((checkpoint_var_name, model_var))
       unused_rules.pop(regexp, None)
       loaded = True
       break
-    if not loaded:
+    if not loaded and not suppress_logging:
       tf.logging.info(
           'Not loading model variable %s from %s as it does not match any rules'
           ' or matches ignored', model_var.name, ckpt_path)
-  for regexp, name_format in unused_rules.items():
-    tf.logging.warning(f'User provided rule matched no variables: ({regexp}, '
-                       f'{name_format})')
+  if not suppress_logging:
+    for regexp, name_format in unused_rules.items():
+      tf.logging.warning(f'User provided rule matched no variables: ({regexp}, '
+                         f'{name_format})')
   return vars_to_load
 
 
@@ -2639,9 +2654,13 @@ def OverrideVarsFromCheckpoints(all_vars, ckpts_loading_rules):
                        ckpt_path)
 
     # Filter the model variables to be overridden.
-    to_load_vars = _GetVarsToLoad(all_vars, loading_rules[0], loading_rules[1],
-                                  ckpt_path)
-    var_refs_to_override = [var[1].experimental_ref() for var in to_load_vars]
+    to_load_vars = _GetVarsToLoad(
+        all_vars,
+        loading_rules[0],
+        loading_rules[1],
+        ckpt_path,
+        suppress_logging=True)
+    var_refs_to_override = [var[1].ref() for var in to_load_vars]
     var_names_to_override = [var[1].name for var in to_load_vars]
 
     overlap_refs = set.intersection(var_refs_overridden, var_refs_to_override)
@@ -2653,11 +2672,11 @@ def OverrideVarsFromCheckpoints(all_vars, ckpts_loading_rules):
                                    loading_rules[1]))
     var_refs_overridden.update(var_refs_to_override)
     var_names_overridden.update(var_names_to_override)
-  tf.logging.info('Model variables overridden: %s', var_refs_overridden)
 
   def _Restore(sess):
     for fn in restore_fns:
       fn(sess)
+    tf.logging.info('Model variables overridden: %s', var_names_overridden)
     return var_names_overridden
 
   return _Restore
@@ -6684,3 +6703,24 @@ def DecodeProtoField(serialized_protos, message_type, field_name, output_type):
   _, [output] = tf.io.decode_proto(serialized_protos, message_type,
                                    [field_name], [output_type])
   return tf.squeeze(output, -1)
+
+
+def DecodeRepeatedProtoField(serialized_protos, message_type, field_name,
+                             output_type):
+  """Decodes a repeated field in a proto.
+
+  Args:
+    serialized_protos: A string Tensor of shape [batch].
+    message_type: Name of the proto message type. Since tf.io.decode_proto() is
+    called with the default descriptor_source='local://', the C++ (not Python!)
+      proto definition(s) must be linked to the binary. You can link in a proto
+      descriptor by creating a cc_library target with alwayslink=1.
+    field_name: Name of the field.
+    output_type: A DType for the output.
+
+  Returns:
+    A Tensor of shape [batch, field_name_size].
+  """
+  [output] = tf.io.decode_proto(serialized_protos, message_type, [field_name],
+                                [output_type]).values
+  return output

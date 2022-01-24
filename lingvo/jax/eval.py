@@ -20,21 +20,25 @@ import functools
 import hashlib
 import os
 import time
-from typing import Optional, Sequence
+from typing import List, Optional, Sequence
 
 from absl import logging
 import jax
 from jax.experimental import maps
 from jax.experimental import mesh_utils
+import jax.numpy as jnp
+from lingvo.jax import base_input
 from lingvo.jax import base_layer
 from lingvo.jax import base_model_params
 from lingvo.jax import checkpoint_pb2
+from lingvo.jax import model
 from lingvo.jax import model_utils
 from lingvo.jax import py_utils
 from lingvo.jax import pytypes
 from lingvo.jax import summary_utils
 from lingvo.jax import train_states
 from lingvo.jax import trainer_lib
+import numpy as np
 import tensorflow.compat.v2 as tf
 
 from lingvo.jax import checkpoints
@@ -163,7 +167,8 @@ def evaluate_pmap_model(
           reshard_inputs=True)
       # If the last check point evaluated matches max train steps, exit.
       if last_checkpoint is not None:
-        last_ckpt_step = int(last_checkpoint.split('_')[-1])
+        last_ckpt_step = checkpoints.get_step_from_checkpoint_asset(
+            last_checkpoint)
         exceeded_ckpt = last_ckpt_step + model_p.train.save_interval_steps
         if exceeded_ckpt >= model_p.train.num_train_steps:
           break
@@ -219,15 +224,16 @@ def evaluate_spmd_model(
     y = jax.ShapeDtypeStruct(x.shape, x.dtype)
     return y
 
-  model_inputs = eval_input_pipelines[0].get_next()
-  inputs_shape = tf.nest.map_structure(get_shape_dtype, model_inputs)
+  # Do not ues eval_input_pipelines[0] directly.
+  sample_model_inputs = eval_input_p[0].Instantiate().get_next()
+  inputs_shape = tf.nest.map_structure(get_shape_dtype, sample_model_inputs)
 
   mesh_shape = model_p.device_mesh.shape
   device_mesh = mesh_utils.create_device_mesh(mesh_shape)
   logging.info('device_mesh: %s', device_mesh)
   global_mesh = maps.Mesh(device_mesh, model_p.mesh_axis_names)
   with maps.mesh(device_mesh, model_p.mesh_axis_names):
-    partitioned_train_state, partitioned_specs, _, eval_step, _ = (
+    partitioned_train_state, partitioned_specs, eval_inputs_partition_specs, _, eval_step, _ = (
         trainer_lib.partition_spmd_model(model_p, init_key, inputs_shape))
     partitioned_train_state = checkpoints.restore_checkpoint(
         partitioned_train_state,
@@ -274,10 +280,14 @@ def evaluate_spmd_model(
             eval_summary_writers,
             step_i,
             eval_input_pipelines,
+            eval_inputs_partition_specs,
+            inputs_shape,
+            global_mesh,
             reshard_inputs=False)
         # If the last check point evaluated matches max train steps, exit.
         if last_checkpoint is not None:
-          last_ckpt_step = int(last_checkpoint.split('_')[-1])
+          last_ckpt_step = checkpoints.get_step_from_checkpoint_asset(
+              last_checkpoint)
           exceeded_ckpt = last_ckpt_step + model_p.train.save_interval_steps
           if exceeded_ckpt >= model_p.train.num_train_steps:
             break
@@ -301,13 +311,14 @@ def evaluate_spmd_model(
         last_checkpoint = new_checkpoint
 
 
-def decode_once(
+def decode(
     model_name: str,
     job_log_dir: Optional[str],
     multi_host_checkpointing: Optional[bool],
     maybe_use_persistence_checkpointing: bool,
-    restore_checkpoint_dir: str,
+    restore_checkpoint_dir: Optional[str],
     restore_checkpoint_step: Optional[int],
+    continuous_decode: bool,
 ) -> None:
   """Runs decoding once on the decoder datasets.
 
@@ -320,6 +331,7 @@ def decode_once(
     restore_checkpoint_dir: The directory from which to restore checkpoint.
     restore_checkpoint_step: If set, the checkpoint step to restore. If unset,
       try to restore from the latest checkpoint if any.
+    continuous_decode: whether to continuously decode on the latest ckpt.
   """
   logging.info('running decode_once on model %s restored from %s', model_name,
                restore_checkpoint_dir)
@@ -333,14 +345,17 @@ def decode_once(
     inp.infeed_host_index = jax.process_index()
 
   if model_p.device_mesh is not None:
+    if continuous_decode:
+      raise NotImplementedError('http://b/214589358: not supported')
     checkpoint_type = checkpoints.retrieve_checkpoint_type(
         multi_host_checkpointing, maybe_use_persistence_checkpointing, model_p)
     decode_once_spmd_model(model_p, decoder_inputs, job_log_dir,
                            checkpoint_type, restore_checkpoint_dir,
                            restore_checkpoint_step)
   else:
-    decode_once_pmap_model(model_p, decoder_inputs, job_log_dir,
-                           restore_checkpoint_dir, restore_checkpoint_step)
+    decode_pmap_model(model_p, decoder_inputs, job_log_dir,
+                      restore_checkpoint_dir, restore_checkpoint_step,
+                      continuous_decode)
 
 
 def _get_dir_names(input_p: Sequence[InstantiableParams]) -> Sequence[str]:
@@ -360,53 +375,53 @@ def _get_dir_names(input_p: Sequence[InstantiableParams]) -> Sequence[str]:
   return ret
 
 
+def _get_step(step: base_layer.JTensorOrPartitionSpec) -> int:
+  """Returns an int for the current global step."""
+  if step.ndim == 0:
+    return jax.device_get(step)
+  if step.ndim == 1:
+    return jax.device_get(step[0])
+  raise ValueError(
+      f'Expecting a replicated 1D global step (got ndim=`{step.ndim}`).')
+
+
 def _get_filename(step: base_layer.JTensorOrPartitionSpec) -> str:
   """Returns a filename for the given step."""
-  if step.ndim == 0:
-    step_num = jax.device_get(step)
-  elif step.ndim == 1:
-    step_num = jax.device_get(step[0])
-  else:
-    raise ValueError(
-        f'Expecting a replicated 1D global step (got ndim=`{step.ndim}`).')
-  return f'decoder_out_{step_num}'
+  step_num = _get_step(step)
+  return f'decoder_out_{step_num}_shard_{jax.process_index()}'
 
 
-def decode_once_pmap_model(
+def decode_pmap_model(
     model_p: InstantiableParams,
     input_p: Sequence[InstantiableParams],
     job_log_dir: Optional[str],
-    restore_checkpoint_dir: str,
+    restore_checkpoint_dir: Optional[str],
     restore_checkpoint_step: Optional[int],
+    continuous_decode: bool,
 ) -> None:
-  """Runs the decoding once on the entire decoder datasets for PMAP model.
+  """Runs the decoding on the entire decoder datasets for a PMAP model.
 
   Args:
     model_p: Params for the data parallel model.
     input_p: List of input params to be decoded.
     job_log_dir: Directory for the job logs.
-    restore_checkpoint_dir: The directory from which to restore checkpoint.
+    restore_checkpoint_dir: The directory from which to restore checkpoint. If
+      None, uses job_log_dir.
     restore_checkpoint_step: If set, the checkpoint step to restore. If unset,
       try to restore from the latest checkpoint if any.
+    continuous_decode: whether to continuously decode on the latest ckpt.
   """
-  jax_model = model_p.Instantiate()
-  inputs = [p.Instantiate() for p in input_p]
+  if continuous_decode and restore_checkpoint_step is not None:
+    raise ValueError('Continuous decoding mode requires restore_checkpoint_step'
+                     '=None, actual restore_checkpoint_step='
+                     f'{restore_checkpoint_step}')
+  restore_checkpoint_dir = restore_checkpoint_dir or os.path.join(
+      job_log_dir, 'checkpoints')
+
   # TODO(shafey): Retrieve the seeds from the model definition instead.
   prng_key = jax.random.PRNGKey(1234)
   prng_key, init_key = jax.random.split(prng_key)
 
-  model_states = trainer_lib.initialize_model_state(jax_model, init_key)
-  if restore_checkpoint_dir:
-    model_states = checkpoints.restore_checkpoint(
-        model_states,
-        restore_checkpoint_dir,
-        global_mesh=None,
-        mesh_axes=None,
-        step=restore_checkpoint_step)
-  replicated_model_states = trainer_lib.replicate_model_state(model_states)
-  del model_states
-  logging.info('replicated_model_states: %s',
-               jax.tree_map(lambda x: x.shape, replicated_model_states))
   # From now on, different replicas should use different random seeds.
   # Here, each process will have its unique prng_key.
   # prng_key will be further split so that each core on a host will get
@@ -417,11 +432,105 @@ def decode_once_pmap_model(
   prng_seed = jax.random.split(eval_key, num=jax.local_device_count())
   logging.info('decoder prng_seed: %s', prng_seed)
 
+  inputs = [p.Instantiate() for p in input_p]
+  summary_base_dir = os.path.join(job_log_dir, 'summaries')
+  dirnames = _get_dir_names(input_p)
+  summary_decode_dirs = [
+      os.path.join(summary_base_dir, f'decode_test_{dirnames[split]}')
+      for split, _ in enumerate(input_p)
+  ]
+  with contextlib.ExitStack() as exit_stack:
+    summary_writers = [
+        exit_stack.enter_context(summary_utils.get_summary_writer(d))
+        for d in summary_decode_dirs
+    ]
+
+    jax_model = model_p.Instantiate()
+    model_states = trainer_lib.initialize_model_state(jax_model, init_key)
+    model_states = checkpoints.restore_checkpoint(
+        model_states,
+        restore_checkpoint_dir,
+        global_mesh=None,
+        mesh_axes=None,
+        step=restore_checkpoint_step)
+    replicated_model_states = trainer_lib.replicate_model_state(model_states)
+    logging.info('replicated_model_states: %s',
+                 jax.tree_map(lambda x: x.shape, replicated_model_states))
+    last_checkpoint = checkpoints.latest_checkpoint(restore_checkpoint_dir)
+
+    while True:
+      _decode_once_pmap_model(jax_model, model_p, inputs, input_p, prng_seed,
+                              job_log_dir, replicated_model_states,
+                              summary_writers)
+      if not continuous_decode:
+        break
+      if last_checkpoint is not None:
+        last_ckpt_step = int(last_checkpoint.split('_')[-1])
+        exceeded_ckpt = last_ckpt_step + model_p.train.save_interval_steps
+        if exceeded_ckpt >= model_p.train.num_train_steps:
+          break
+      # Release replicated_model_states.
+      del replicated_model_states
+      new_checkpoint = checkpoints.latest_checkpoint(restore_checkpoint_dir)
+      while new_checkpoint == last_checkpoint:
+        time.sleep(60)
+        new_checkpoint = checkpoints.latest_checkpoint(restore_checkpoint_dir)
+      logging.info('Found new checkpoint: %s', new_checkpoint)
+      model_states = checkpoints.restore_checkpoint(
+          model_states,
+          restore_checkpoint_dir,
+          global_mesh=None,
+          mesh_axes=None)
+      replicated_model_states = trainer_lib.replicate_model_state(model_states)
+      last_checkpoint = new_checkpoint
+
+
+def _aggregate_metrics(metrics_dict, pmap_axis_name):
+  """Aggregate a dict of metrics over all replicas."""
+  mean_metrics = type(metrics_dict)()
+  for k, v in metrics_dict.items():
+    value, weight = v
+    sum_value = jax.lax.psum(value * weight, axis_name=pmap_axis_name)
+    sum_weight = jax.lax.psum(weight, axis_name=pmap_axis_name)
+    mean_metrics[k] = (sum_value / (sum_weight + 1e-8), sum_weight)
+  return mean_metrics
+
+
+def _decode_once_pmap_model(
+    jax_model: model.BaseTask,
+    model_p: InstantiableParams,
+    inputs: List[base_input.BaseInput],
+    input_p: Sequence[InstantiableParams],
+    prng_seed: JTensor,
+    job_log_dir: Optional[str],
+    replicated_model_states: train_states.TrainState,
+    summary_writers: List[SummaryWriter],
+) -> None:
+  """Runs the decoding on the entire decoder datasets for a PMAP model.
+
+  Args:
+    jax_model: instantiated model from model_p.
+    model_p: Params for the data parallel model.
+    inputs: instantiated inputs.
+    input_p: List of input params to be decoded.
+    prng_seed: The prng seed used for decoding.
+    job_log_dir: Directory for the job logs.
+    replicated_model_states: A TrainState object.
+    summary_writers: The summary writer objects to log summaries.
+  """
+  step_i = _get_step(replicated_model_states.step)
+  pmap_axis_name = 'batch'
+  aggregate_metrics = functools.partial(
+      _aggregate_metrics, pmap_axis_name=pmap_axis_name)
+  pmap_aggregate_metrics = jax.pmap(
+      aggregate_metrics, axis_name=pmap_axis_name, out_axes=None)
+
   def decode_step(mdl_vars, prng_key, global_step, inputs):
-    out = trainer_lib.decode_step(jax_model, mdl_vars, prng_key, global_step,
-                                  inputs, model_p.fprop_dtype)
-    out = jax.lax.all_gather(out, axis_name='batch', tiled=True)
-    return out
+    metrics, out = trainer_lib.decode_step(jax_model, mdl_vars, prng_key,
+                                           global_step, inputs,
+                                           model_p.fprop_dtype)
+    mean_metrics = aggregate_metrics(metrics)
+    return mean_metrics, out
 
   # As an example, suppose the output leaf from trainer_lib.decoder_step()
   # for each core has shape: [per_core_batch_size, decoding_length].
@@ -438,7 +547,10 @@ def decode_once_pmap_model(
   #   z = jax.pmap(
   #       lambda y: jax.lax.all_gather(y+1, axis_name='i', tiled=True),
   #       axis_name='i', out_axes=None)(x)
-  pmap_decode_step = jax.pmap(decode_step, axis_name='batch', out_axes=None)
+  #
+  # We only aggregate metrics, not `out`, hence the tuple for out_axes.
+  pmap_decode_step = jax.pmap(
+      decode_step, axis_name=pmap_axis_name, out_axes=(None, 0))
   decode_step_func = functools.partial(pmap_decode_step,
                                        replicated_model_states.mdl_vars,
                                        prng_seed, replicated_model_states.step)
@@ -448,18 +560,64 @@ def decode_once_pmap_model(
   ]
   decodes = [list() for _ in input_p]
   for split, num_split_steps in enumerate(num_steps):
+    logging.info('Start decoding on input %s', input_p[split].name)
     step_num = 0
+    metrics = {}
     while num_split_steps < 0 or step_num < num_split_steps:
       step_num += 1
       try:
         batch = inputs[split].get_next()
       except (tf.errors.OutOfRangeError, StopIteration):
+        inputs[split].reset()
         break
       batch = tf.nest.map_structure(py_utils.reshard, batch)
-      out = decode_step_func(batch)
-      if jax.process_index() == 0:
-        processed = jax_model.process_decode_out(inputs[split], out)
-        decodes[split].extend(processed)
+      batch_metrics, out = decode_step_func(batch)
+      logging.info('Finished decoding input batch %d', step_num)
+      out = tf.nest.map_structure(py_utils.unshard, out)
+      process_metrics, processed = jax_model.process_decode_out(
+          inputs[split], out)
+      decodes[split].extend(processed)
+      logging.info('Finished processing decoded input batch %d', step_num)
+
+      # Reshard the metrics for pmap.
+      reshard_process_metrics = type(process_metrics)()
+      for k, v in process_metrics.items():
+        value, weight = v
+        new_value = jnp.ones(
+            shape=(jax.local_device_count(),), dtype=value.dtype) * value
+        new_weight = jnp.ones(
+            shape=(jax.local_device_count(),),
+            dtype=weight.dtype) * weight / jax.local_device_count()
+        reshard_process_metrics[k] = (new_value, new_weight)
+      process_metrics = pmap_aggregate_metrics(reshard_process_metrics)
+      batch_metrics.update(process_metrics)
+      batch_metrics = py_utils.maybe_unreplicate_gda(batch_metrics)
+      for k in batch_metrics:
+        if k in metrics:
+          metrics[k] += [batch_metrics[k]]
+        else:
+          metrics[k] = [batch_metrics[k]]
+
+    for k in metrics:
+      metric_values = np.stack([metric[0] for metric in metrics[k]])
+      metric_weights = np.stack([metric[1] for metric in metrics[k]])
+      sum_metric_weights = np.sum(
+          np.stack([metric[1] for metric in metrics[k]]))
+      weighted_average = np.sum(
+          metric_values * metric_weights) / sum_metric_weights
+      metrics[k] = (weighted_average, sum_metric_weights)
+
+    with summary_writers[split].as_default():
+      for key, value in metrics.items():
+        weighted_average, sum_metric_weights = value
+        logging.info('  %s=%f (weight=%f)', key, weighted_average.item(),
+                     sum_metric_weights.item())
+        summary_utils.write_summary_tensor(step_i, f'Metrics/{key}',
+                                           weighted_average.item(),
+                                           summary_utils.SummaryType.SCALAR)
+        summary_utils.write_summary_tensor(step_i, f'Metrics/{key}-weight',
+                                           sum_metric_weights.item(),
+                                           summary_utils.SummaryType.SCALAR)
 
   basedir = os.path.join(job_log_dir, 'decoder_out')
   dirnames = _get_dir_names(input_p)
@@ -499,13 +657,13 @@ def decode_once_spmd_model(
   prng_key = jax.random.PRNGKey(1234)
   prng_key, init_key = jax.random.split(prng_key)
 
-  if (restore_checkpoint_dir and
-      checkpoint_type == CheckpointType.CHECKPOINT_MULTI_HOST_FLAX):
+  if restore_checkpoint_dir:
     restore_checkpoint_parent_dir = restore_checkpoint_dir
-    # TODO(zhouwk): add sanity check on number of subdirs and number of
-    # processes and fail early if unequal.
-    restore_checkpoint_dir = os.path.join(restore_checkpoint_dir,
-                                          f'{jax.process_index():03d}')
+    if checkpoint_type == CheckpointType.CHECKPOINT_MULTI_HOST_FLAX:
+      # TODO(zhouwk): add sanity check on number of subdirs and number of
+      # processes and fail early if unequal.
+      restore_checkpoint_dir = os.path.join(restore_checkpoint_dir,
+                                            f'{jax.process_index():03d}')
 
   multi_host_checkpointing = bool(checkpoint_type in {
       CheckpointType.CHECKPOINT_MULTI_HOST_FLAX, CheckpointType.CHECKPOINT_GDA
@@ -538,10 +696,7 @@ def decode_once_spmd_model(
   mesh_shape = model_p.device_mesh.shape
   device_mesh = mesh_utils.create_device_mesh(mesh_shape)
   logging.info('device_mesh: %s', device_mesh)
-  if jax.process_index() == 0:
-    # The instantiated model is only used for processing decode
-    # outputs, which only happens on process 0.
-    jax_model = model_p.Instantiate()
+  jax_model = model_p.Instantiate()
   global_mesh = maps.Mesh(device_mesh, model_p.mesh_axis_names)
   with maps.mesh(device_mesh, model_p.mesh_axis_names):
     partitioned_train_state, partitioned_specs, decode_step_fn = (
@@ -578,7 +733,10 @@ def decode_once_spmd_model(
     ]
     inputs = [p.Instantiate() for p in input_p]
     decodes = [list() for _ in input_p]
+    process_id = jax.process_index()
+
     for split, num_split_steps in enumerate(num_steps):
+      logging.info('Start decoding on input %s', input_p[split].name)
       step_num = 0
       while num_split_steps < 0 or step_num < num_split_steps:
         step_num += 1
@@ -586,12 +744,34 @@ def decode_once_spmd_model(
           batch = inputs[split].get_next()
         except (tf.errors.OutOfRangeError, StopIteration):
           break
-        out = spmd_decode_step_fn(batch)
-        # Gathers all local shards to a SDA.
-        out = py_utils.maybe_gda_to_sda(out)
-        if jax.process_index() == 0:
-          processed = jax_model.process_decode_out(inputs[split], out)
-          decodes[split].extend(processed)
+        _, out = spmd_decode_step_fn(batch)
+        # Output is fully replicated now, so it's ok to unreplicate it by
+        # retrieving from device 0 only.
+        out = py_utils.maybe_unreplicate_gda(out)
+        logging.info('Finished decoding input batch %d', step_num)
+        # Manually shard the output per each jax process.
+        # We require that all fields in the output is batch major.
+        global_batch_size = next(iter(out.values())).shape[0]
+        if global_batch_size % jax.process_count() != 0:
+          raise ValueError(f'Global batch size {global_batch_size} must divide '
+                           f'jax process count {jax.process_count()}')
+        for k, v in out.items():
+          if v.shape[0] != global_batch_size:
+            raise ValueError('We require that all fields in the decode output '
+                             'to have batch size as the first dim, got shape='
+                             f'{v.shape} with key={k}, expect batch size = '
+                             f'{global_batch_size}')
+        per_process_batch_size = global_batch_size // jax.process_count()
+
+        def shard(x, per_process_batch_size=per_process_batch_size):
+          return x[(process_id *
+                    per_process_batch_size):((process_id + 1) *
+                                             per_process_batch_size)]
+
+        out = jax.tree_map(shard, out)
+        _, processed = jax_model.process_decode_out(inputs[split], out)
+        decodes[split].extend(processed)
+        logging.info('Finished processing decoded input batch %d', step_num)
 
   basedir = os.path.join(job_log_dir, 'decoder_out')
   dirnames = _get_dir_names(input_p)
@@ -601,8 +781,7 @@ def decode_once_spmd_model(
     if not tf.io.gfile.exists(dir_path):
       tf.io.gfile.makedirs(dir_path)
   filenames = [os.path.join(basedir, s, filename) for s in dirnames]
-  if jax.process_index() == 0:
-    for split, output_file in enumerate(filenames):
-      logging.info('Writing decoder output to %s with %d entries', output_file,
-                   len(decodes[split]))
-      io_utils.WriteKeyValuePairs(output_file, decodes[split])
+  for split, output_file in enumerate(filenames):
+    logging.info('Writing decoder output to %s with %d entries', output_file,
+                 len(decodes[split]))
+    io_utils.WriteKeyValuePairs(output_file, decodes[split])

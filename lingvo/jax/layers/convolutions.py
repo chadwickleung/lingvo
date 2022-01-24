@@ -15,6 +15,8 @@
 # ==============================================================================
 """Convolutional layers."""
 
+from typing import Tuple
+
 import jax
 from jax import numpy as jnp
 from lingvo.jax import base_layer
@@ -143,20 +145,18 @@ class Conv2D(base_layer.BaseLayer):
 
 
 class ConvBNAct(Conv2D):
-  """A block of conv-bn-activation layers used for image encoders."""
+  """A block of conv-bn-activation layers used for image encoders.
+
+  By default, we use cross-replica sum on TPUs.
+  """
 
   @classmethod
   def Params(cls) -> InstantiableParams:
     p = super().Params()
-    # TODO(aurkor): Unify all BN-related params to a single BN layer params.
     p.Define('batch_norm', True, 'Whether or not to apply batch norm.')
     p.Define('bn_decay', 0.9, 'Decay in updating the mean and variance.')
     p.Define(
-        'bn_use_moving_avg_in_training', False,
-        'If True, uses moving avg (mean, variance) during both training '
-        'and inference.')
-    p.Define(
-        'bn_enable_cross_replica_sum_on_tpu', False,
+        'bn_cross_replica_sum_on_tpu', True,
         'If true, computes global mean and variance across all replicas.'
         'Only effective for tpu.')
     p.Define(
@@ -172,8 +172,8 @@ class ConvBNAct(Conv2D):
           name='bn',
           dim=p.filter_shape[3],
           decay=p.bn_decay,
-          use_moving_avg_in_training=p.bn_use_moving_avg_in_training,
-          enable_cross_replica_sum_on_tpu=p.bn_enable_cross_replica_sum_on_tpu,
+          use_moving_avg_in_training=False,
+          enable_cross_replica_sum_on_tpu=p.bn_cross_replica_sum_on_tpu,
       )
       self.create_child('bn', bn)
     act_p = activations.Activation.Params().Set(activation=p.activation)
@@ -202,6 +202,58 @@ class ConvBNAct(Conv2D):
       outputs = self.bn.fprop(theta.bn, outputs)
     outputs = self.activation.fprop(theta.activation, outputs)
     return outputs
+
+  def fprop_with_padding(self, theta: NestedMap, inputs: JTensor,
+                         paddings: JTensor) -> Tuple[JTensor, JTensor]:
+    """Forward prop with time paddings.
+
+    Args:
+      theta: NestedMap containing the filter weights of shape [F_h, F_w, D_in,
+        D_out]. Optionally for depthwise separable convolutions the kernel can
+        be of shape [F_h, F_w, D_in//f, D_out], where f is the
+        feature_group_count. Note that in this case D_out must be a multiple of
+        feature_group_count.
+      inputs: Input sequence of shape [B, H, W, D_in], also known more popularly
+        as NHWC format.
+      paddings: Input sequence of shape [B, H], where H is the time dimension.
+
+    Returns:
+      Output sequence after applying convolutions of shape [B, H', W', D_out].
+      Note that if the padding is SAME and there is no dilation and striding,
+      then H' = H and W' = W.
+      Output padding after applying convolutions.
+    """
+    p = self.params
+
+    outputs = self.fprop(theta, inputs)
+
+    if p.filter_stride[0] == 1 and p.padding == 'SAME':
+      return outputs, paddings
+    if p.padding == 'SAME':
+      input_length = paddings.shape[1]
+      stride = p.filter_stride[0]
+
+      pad_len = (input_length + stride - 1) // stride * stride - input_length
+      out_padding = jax.lax.conv_general_dilated(
+          lhs=paddings[:, :, None],
+          rhs=jnp.ones([1, 1, 1]),
+          window_strides=p.filter_stride[:1],
+          padding=[(0, pad_len)],
+          rhs_dilation=p.dilations[:1],
+          dimension_numbers=('NHC', 'HIO', 'NHC'))
+      out_padding = jnp.squeeze(out_padding, axis=-1)
+    else:
+
+      def rolling_window(arr: JTensor, window: int, stride: int):
+        idx = jnp.arange(0, arr.shape[1] - window + 1,
+                         stride)[:, None] + jnp.arange(window)[None, :]
+        return arr[:, idx]
+
+      window = p.filter_shape[0]
+      stride = p.filter_stride[0]
+      out_padding = rolling_window(paddings, window, stride)
+      out_padding = out_padding.min(axis=-1, keepdims=False)
+    return outputs, out_padding
 
 
 # TODO(nanxinchen): add Depthwise Conv2D support

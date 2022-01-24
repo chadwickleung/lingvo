@@ -145,10 +145,10 @@ def train_step_single_learner(
       assert NotImplementedError(f'fprop_dtype {fprop_dtype} not supported.')
 
     with base_layer.JaxContext.new_context(
-        params=context_p, prng_key=subkey, global_step=states.step):
-      # Prepares mdl for fprop. This clears all forward-updated vars that kept
-      # locally in mdl.
-      mdl.prepare_fprop()
+        params=context_p, prng_key=subkey,
+        global_step=states.step) as jax_context:
+      jax_context.bind(mdl, mdl_vars,
+                       [base_layer.SCOPE_VARS, base_layer.SCOPE_AUX_LOSS])
 
       metrics, per_example_output = mdl.fprop(mdl_vars, inputs)
       loss_name = learner.loss_name
@@ -169,7 +169,7 @@ def train_step_single_learner(
       weighted_loss = loss * loss_weight
       # Fetch forward-updated vars, which often include batch norm vars, other
       # misc stats, etc.
-      forward_updated_vars = mdl.forward_updated_vars
+      forward_updated_vars = mdl.updated_vars
       # Finally, fetch all the summary tensors.
       summary_tensors = base_layer.all_summaries()
       if in_pmap:
@@ -234,7 +234,10 @@ def train_step_single_learner(
   # Carry out backward computation under a JaxContext.
   prng_key, subkey = jax.random.split(prng_key)
   with base_layer.JaxContext.new_context(
-      params=context_p, prng_key=subkey, global_step=states.step):
+      params=context_p, prng_key=subkey,
+      global_step=states.step) as jax_context:
+    # Nothing is allowed to change, except for summaries.
+    jax_context.bind(mdl, states.mdl_vars, [base_layer.SCOPE_AUX_LOSS])
 
     # Add a summary for learning rate
     learning_rate = learner.optimizer.get_learning_rate(states.step)
@@ -352,10 +355,11 @@ def eval_step_single_learner(
     assert NotImplementedError(f'fprop_dtype {fprop_dtype} not supported.')
 
   with base_layer.JaxContext.new_context(
-      params=context_p, prng_key=prng_key, global_step=global_step):
+      params=context_p, prng_key=prng_key,
+      global_step=global_step) as jax_context:
     # Prepares mdl for fprop. This clears all forward-updated vars that kept
     # locally in mdl.
-    mdl.prepare_fprop()
+    jax_context.bind(mdl, mdl_vars, [base_layer.SCOPE_AUX_LOSS])
 
     # Support multiple learners.
     assert len(mdl.learners) == 1
@@ -409,12 +413,13 @@ def eval_step_single_learner(
   return mean_loss, mean_metrics, per_example_out, summary_tensors
 
 
-def decode_step(mdl: Model,
-                mdl_vars: NestedJTensor,
-                prng_key: JTensor,
-                global_step: JTensor,
-                inputs: Union[JTensor, NestedMap],
-                fprop_dtype: jnp.dtype = jnp.float32) -> NestedMap:
+def decode_step(
+    mdl: Model,
+    mdl_vars: NestedJTensor,
+    prng_key: JTensor,
+    global_step: JTensor,
+    inputs: Union[JTensor, NestedMap],
+    fprop_dtype: jnp.dtype = jnp.float32) -> Tuple[NestedMap, NestedMap]:
   """Decodes a model for a single step.
 
   Args:
@@ -427,7 +432,7 @@ def decode_step(mdl: Model,
     fprop_dtype: fprop datatype, can be either jnp.float32 or jnp.bfloat16.
 
   Returns:
-    A NestedMap as computed by mdl.decode().
+    A tuple of (metrics, results) as computed by mdl.decode().
   """
   context_p = base_layer.JaxContext.Params().Set(do_eval=True)
   # Fold in global_step as part of the random seed key, so that random
@@ -441,10 +446,10 @@ def decode_step(mdl: Model,
     assert NotImplementedError(f'fprop_dtype {fprop_dtype} not supported.')
 
   with base_layer.JaxContext.new_context(
-      params=context_p, prng_key=prng_key, global_step=global_step):
-    # Prepares mdl for fprop. This clears all forward-updated vars that kept
-    # locally in mdl.
-    mdl.prepare_fprop()
+      params=context_p, prng_key=prng_key,
+      global_step=global_step) as jax_context:
+    jax_context.bind(mdl, mdl_vars, [base_layer.SCOPE_AUX_LOSS])
+
     return mdl.decode(mdl_vars, inputs)
 
 
@@ -562,11 +567,18 @@ def infer_partition_spec_based_on_rank_fn(
     return base_layer.to_partition_spec(mapping_dict[key], mesh_names)
 
 
+def get_input_partition_specs(mesh_axis_names, inputs_shape):
+  # Compute inputs PartitionSpec from inputs_shape
+  inputs_partition_spec_fn = functools.partial(
+      shard_on_batch_dim_partition_spec, mesh_axis_names)
+  return tf.nest.map_structure(inputs_partition_spec_fn, inputs_shape)
+
+
 def partition_spmd_model(
     mdl_params: InstantiableParams,
     init_key: PRNGKey,
     inputs_shape: NestedShapeDtypeStruct,
-) -> Tuple[TrainState, TrainState, TrainStepFn, EvalStepFn, int]:
+) -> Tuple[TrainState, TrainState, TrainState, TrainStepFn, EvalStepFn, int]:
   """Setup the SPMD model and return sharded train and eval step function.
 
   For partitioning inputs, it is assumed the `mdl_params` has a field
@@ -579,23 +591,19 @@ def partition_spmd_model(
     inputs_shape: Shape of the inputs for use in pjit sharding.
 
   Returns:
-    (partitioned_train_state, train_state_partition_specs, train_step_fn,
-    eval_step_fn, total_num_params): The partitioned TrainState, the
-    corresponding partitioned TrainState specs, the train step function, eval
-    step function and total number of parameters.
+    (partitioned_train_state, train_state_partition_specs,
+    inputs_partition_spec, train_step_fn, eval_step_fn, total_num_params):
+    The partitioned TrainState, the corresponding partitioned TrainState specs,
+    the train step function, eval step function and total number of parameters.
   """
   mesh_names = mdl_params.mesh_axis_names
   mdl = mdl_params.Instantiate()
 
-  # Compute inputs PartitionSpec from inputs_shape
-  inputs_partition_spec_fn = functools.partial(
-      shard_on_batch_dim_partition_spec, mdl_params.mesh_axis_names)
   reshard_inputs_fn = functools.partial(reshard_input_based_on_rank_fn,
                                         mdl_params.train.inputs_split_mapping,
                                         mdl_params.mesh_axis_names)
-
-  inputs_partition_spec = tf.nest.map_structure(inputs_partition_spec_fn,
-                                                inputs_shape)
+  inputs_partition_spec = get_input_partition_specs(mdl_params.mesh_axis_names,
+                                                    inputs_shape)
 
   # Initialize the partitioned vars.
   train_state_partition_specs, var_shapes, partitioned_train_state = (
@@ -675,8 +683,8 @@ def partition_spmd_model(
       in_axis_resources=eval_fn_in_partition_specs,
       out_axis_resources=eval_fn_out_partition_specs)
 
-  return (partitioned_train_state, train_state_partition_specs, train_step,
-          eval_step, total_num_params)
+  return (partitioned_train_state, train_state_partition_specs,
+          inputs_partition_spec, train_step, eval_step, total_num_params)
 
 
 def partition_spmd_model_decode(
