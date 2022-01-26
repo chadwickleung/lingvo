@@ -21,6 +21,7 @@ from lingvo.jax.layers.attentions import causal_mask
 from lingvo.jax.layers.attentions import causal_segment_mask
 from lingvo.jax.layers.attentions import convert_paddings_to_mask
 from lingvo.jax.layers.attentions import DotProductAttention
+from lingvo.jax.layers.attentions import limited_context_mask_from_padding
 from lingvo.jax.layers.attentions import PerDimScale
 from lingvo.jax.layers.attentions import RelativeBias
 from lingvo.jax.layers.attentions import segment_mask
@@ -60,6 +61,7 @@ from lingvo.jax.layers.recurrent import scan
 from lingvo.jax.layers.repeats import Repeat
 from lingvo.jax.layers.resnets import ResNet
 from lingvo.jax.layers.resnets import ResNetBlock
+from lingvo.jax.layers.spectrum_augmenter import SpectrumAugmenter
 from lingvo.jax.layers.stochastics import Dropout
 from lingvo.jax.layers.stochastics import StochasticResidual
 from lingvo.jax.layers.transformers import compute_attention_masks_for_extend_step
