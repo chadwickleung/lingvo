@@ -366,7 +366,7 @@ class ExecutorTpu(base_runner.BaseRunner):
         self._container_id), contextlib.ExitStack() as stack:
       # Confirmed: Not EagerMode
       if not py_utils.IsEagerMode():
-        # self._graph is set to tf.Graph() in base_runner.py
+        # Chadwick: self._graph is set to tf.Graph() in base_runner.py
         stack.enter_context(self._graph.as_default())
         stack.enter_context(tf.device(self._cluster.GetPlacer()))
       if FLAGS.pdb_on_exception:

@@ -40,6 +40,8 @@ from tensorflow.python.tpu import tpu_function
 from tensorflow.python.tpu import training_loop as tpu_training_loop
 from tensorflow.python.tpu.ops import tpu_ops
 
+from tensorflow.python.client import timeline
+
 # pylint:enable=g-direct-tensorflow-import
 FLAGS = tf.flags.FLAGS
 # According to the Runtime team, by default (set to True), even if we use
@@ -258,6 +260,15 @@ class BaseProgram:
         tf.logging.vlog(1, '_InfeedLoop %d', i)
         tf.logging.info('_InfeedLoop %d', i)
         tf.logging.info(self._task.input.tpu_infeed_op)
+        if i == 50:
+          run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+          run_metadata = tf.RunMetadata()
+          sess.run(self._task.input.tpu_infeed_op, options=run_options, run_metadata=run_metadata)
+          tl = timeline.Timeline(run_metadata.step_stats)
+          ctf = tl.generate_chrome_trace_format()
+          with open('timeline.json', 'w') as f:
+            f.write(ctf)
+          continue
         sess.run(self._task.input.tpu_infeed_op)
       self._WriteInputDataStats(sess)
       tf.logging.info('_InfeedLoop done')
@@ -688,7 +699,7 @@ class TrainProgram(BaseProgram):
       tf.logging.info('Start infeed loop')
       infeed_future = self._infeed_pool.apply_async(
           self._InfeedLoop, args=(sess,))
-      # Confirmed: self.tpu_outs == TrainFunc()
+      # Confirmed: self.tpu_outs == what returned by TrainFunc()
       # Chadwick: I believe that this is where the main Graph gets run
       tf.logging.info('Run Tpu_outs')
       tf.logging.info(self.tpu_outs)
