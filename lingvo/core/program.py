@@ -19,6 +19,7 @@ import contextlib
 import multiprocessing.dummy
 import os
 import queue
+from ssl import Options
 import time
 
 from lingvo import base_trial
@@ -255,19 +256,19 @@ class BaseProgram:
     """Infeed loop for input generator for batched data and input data stats."""
     tf.logging.info(f'_InfeedLoop start {self._program_name} '
                     f'on dataset {self.params.dataset_name}')
+    run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+    run_metadata = tf.RunMetadata()
     try:
       for i in range(self._steps_per_loop):
         tf.logging.vlog(1, '_InfeedLoop %d', i)
         tf.logging.info('_InfeedLoop %d', i)
         tf.logging.info(self._task.input.tpu_infeed_op)
         if i == 50:
-          run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-          run_metadata = tf.RunMetadata()
           sess.run(self._task.input.tpu_infeed_op, options=run_options, run_metadata=run_metadata)
-          tl = timeline.Timeline(run_metadata.step_stats)
-          ctf = tl.generate_chrome_trace_format()
-          with open('/tmp/lingvo/timeline.json', 'w') as f:
-            f.write(ctf)
+          tl_infeed_loop = timeline.Timeline(run_metadata.step_stats)
+          ctf_infeed_loop = tl_infeed_loop.generate_chrome_trace_format()
+          with open('/tmp/lingvo/timeline_infeed_loop.json', 'w') as f:
+            f.write(ctf_infeed_loop)
           continue
         sess.run(self._task.input.tpu_infeed_op)
       self._WriteInputDataStats(sess)
@@ -658,6 +659,8 @@ class TrainProgram(BaseProgram):
 
   def Run(self, sess=None):
     # Prevent overtraining.
+    run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+    run_metadata = tf.RunMetadata()
     tf.logging.info('Running TrainProgram')
     if py_utils.IsEagerMode():
       task_global_step = self._task.global_step.numpy()
@@ -665,7 +668,11 @@ class TrainProgram(BaseProgram):
       # Chadwick: Investigate what means by global step, is it the whole model?
       tf.logging.info('Sess run for task global step')
       tf.logging.info(self._task.global_step)
-      task_global_step = sess.run(self._task.global_step)
+      task_global_step = sess.run(self._task.global_step, options=run_options, run_metadata=run_metadata)
+      tl_task_global_step_0 = timeline.Timeline(run_metadata.step_stats)
+      ctf_task_global_step_0 = tl_task_global_step_0.generate_chrome_trace_format()
+      with open('/tmp/lingvo/timeline_task_global_step_0.json', 'w') as f:
+        f.write(ctf_task_global_step_0)
       tf.logging.info('Done Sess run for global step')
     if self._ShouldStop(task_global_step):
       return True
@@ -703,7 +710,11 @@ class TrainProgram(BaseProgram):
       # Chadwick: I believe that this is where the main Graph gets run
       tf.logging.info('Run Tpu_outs')
       tf.logging.info(self.tpu_outs)
-      values, outfeeds = sess.run(self.tpu_outs)
+      values, outfeeds = sess.run(self.tpu_outs, options=run_options, run_metadata=run_metadata)
+      tl_tpu_outs = timeline.Timeline(run_metadata.step_stats)
+      ctf_tpu_outs = tl_tpu_outs.generate_chrome_trace_format()
+      with open('/tmp/lingvo/timeline_tpu_outs.json', 'w') as f:
+        f.write(ctf_tpu_outs)
       tf.logging.info('Done running tpu_outs')
       infeed_future.wait()
 
@@ -713,7 +724,11 @@ class TrainProgram(BaseProgram):
     if py_utils.IsEagerMode():
       global_step = self._model.global_step.numpy()
     else:
-      global_step = sess.run(self._model.global_step)
+      global_step = sess.run(self._model.global_step, options=run_options, run_metadata=run_metadata)
+      tl_model_global_step = timeline.Timeline(run_metadata.step_stats)
+      ctf_model_global_step = tl_model_global_step.generate_chrome_trace_format()
+      with open('/tmp/lingvo/timeline_model_global_step.json', 'w') as f:
+        f.write(ctf_model_global_step)
     step_rate, example_rate, total_examples = (
         self._step_rate_tracker.ComputeStepRate(
             global_step,
@@ -735,7 +750,11 @@ class TrainProgram(BaseProgram):
       task_global_step = self._task.global_step.numpy()
       # TODO(laigd): ProcessFPropResults doesn't work yet.
     else:
-      task_global_step = sess.run(self._task.global_step)
+      task_global_step = sess.run(self._task.global_step, options=run_options, run_metadata=run_metadata)
+      tl_task_global_step_1 = timeline.Timeline(run_metadata.step_stats)
+      ctf_task_global_step_1 = tl_task_global_step_1.generate_chrome_trace_format()
+      with open('/tmp/lingvo/timeline_task_global_step_1.json', 'w') as f:
+        f.write(ctf_task_global_step_1)
       summaries = self._task.ProcessFPropResults(sess, task_global_step,
                                                  eval_metrics, outfeeds)
       self._WriteSummaries(
