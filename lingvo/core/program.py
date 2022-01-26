@@ -266,7 +266,7 @@ class BaseProgram:
           sess.run(self._task.input.tpu_infeed_op, options=run_options, run_metadata=run_metadata)
           tl = timeline.Timeline(run_metadata.step_stats)
           ctf = tl.generate_chrome_trace_format()
-          with open('timeline.json', 'w+') as f:
+          with open('/tmp/lingvo/timeline.json', 'w') as f:
             f.write(ctf)
           continue
         sess.run(self._task.input.tpu_infeed_op)
