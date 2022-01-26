@@ -266,7 +266,7 @@ class BaseProgram:
           sess.run(self._task.input.tpu_infeed_op, options=run_options, run_metadata=run_metadata)
           tl = timeline.Timeline(run_metadata.step_stats)
           ctf = tl.generate_chrome_trace_format()
-          with open('timeline.json', 'w') as f:
+          with open('timeline.json', 'w+') as f:
             f.write(ctf)
           continue
         sess.run(self._task.input.tpu_infeed_op)
@@ -704,6 +704,7 @@ class TrainProgram(BaseProgram):
       tf.logging.info('Run Tpu_outs')
       tf.logging.info(self.tpu_outs)
       values, outfeeds = sess.run(self.tpu_outs)
+      tf.logging.info('Done running tpu_outs')
       infeed_future.wait()
 
     self._eval_metrics.PackMetricsValues(values)
