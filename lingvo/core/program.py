@@ -42,6 +42,7 @@ from tensorflow.python.tpu import training_loop as tpu_training_loop
 from tensorflow.python.tpu.ops import tpu_ops
 
 from tensorflow.python.client import timeline
+import time
 
 # pylint:enable=g-direct-tensorflow-import
 FLAGS = tf.flags.FLAGS
@@ -258,6 +259,9 @@ class BaseProgram:
                     f'on dataset {self.params.dataset_name}')
     run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
     run_metadata = tf.RunMetadata()
+    tf.logging.info('Run in 3 seconds')
+    time.sleep(3)
+    tf.logging.info('Infeed Loop Starts')
     try:
       for i in range(self._steps_per_loop):
         tf.logging.vlog(1, '_InfeedLoop %d', i)
