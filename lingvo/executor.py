@@ -33,6 +33,7 @@ from lingvo.core import tpu_embedding_layers
 import numpy as np
 
 import wandb
+from tensorflow.python.client import timeline
 
 from lingvo import base_runner
 from tensorflow.python.tpu import device_assignment as device_assignment_lib  # pylint: disable=g-direct-tensorflow-import
@@ -461,6 +462,8 @@ class ExecutorTpu(base_runner.BaseRunner):
     self._RunLoop('executor_tpu', self._Loop)
 
   def _Loop(self):
+    run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+    run_metadata = tf.RunMetadata()
     with self._cluster, tf.container(
         self._container_id), contextlib.ExitStack() as stack:
       if py_utils.IsEagerMode():
@@ -479,6 +482,10 @@ class ExecutorTpu(base_runner.BaseRunner):
           sess.run(
               tf.tpu.initialize_system(
                   embedding_config=config_proto, job=worker))
+          tl_initialize_system = timeline.Timeline(run_metadata.step_stats)
+          ctf_initialize_system = tl_initialize_system.generate_chrome_trace_format()
+          with open('/tmp/lingvo/timeline_initialize_system.json', 'w') as f:
+            f.write(ctf_initialize_system)
 
       # Initialize the variables first, if needed.
       # Need to call create global step again because this is run in a thread.
@@ -504,9 +511,24 @@ class ExecutorTpu(base_runner.BaseRunner):
         future.get()
 
       if not py_utils.IsEagerMode():
-        sess.run(self._initialize_tables)
-        sess.run(self._initialize_local_vars)
-        sess.run(self._load_ops)
+        # sess.run(self._initialize_tables)
+        # sess.run(self._initialize_local_vars)
+        # sess.run(self._load_ops)
+        sess.run(self._initialize_tables, options=run_options, run_metadata=run_metadata)
+        sess.run(self._initialize_local_vars, options=run_options, run_metadata=run_metadata)
+        sess.run(self._load_ops, options=run_options, run_metadata=run_metadata)
+        tl_initialize_tables = timeline.Timeline(run_metadata.step_stats)
+        ctf_initialize_tables = tl_initialize_tables.generate_chrome_trace_format()
+        with open('/tmp/lingvo/timeline_initialize_tables.json', 'w') as f:
+          f.write(ctf_initialize_tables)
+        tl_initialize_local_vars = timeline.Timeline(run_metadata.step_stats)
+        ctf_initialize_local_vars = tl_initialize_local_vars.generate_chrome_trace_format()
+        with open('/tmp/lingvo/timeline_initialize_local_vars.json', 'w') as f:
+          f.write(ctf_initialize_local_vars)
+        tl_load_ops = timeline.Timeline(run_metadata.step_stats)
+        ctf_load_ops = tl_load_ops.generate_chrome_trace_format()
+        with open('/tmp/lingvo/timeline_load_ops.json', 'w') as f:
+          f.write(ctf_load_ops)
 
       program_schedule = None
       # Threadpool to run code in programs async with TF Sessions (on TPUs).
@@ -519,14 +541,24 @@ class ExecutorTpu(base_runner.BaseRunner):
         if py_utils.IsEagerMode():
           global_step = py_utils.GetGlobalStep().numpy()
         else:
-          global_step = sess.run(py_utils.GetGlobalStep())
+          # global_step = sess.run(py_utils.GetGlobalStep())
+          global_step = sess.run(py_utils.GetGlobalStep(), options=run_options, run_metadata=run_metadata)
+          tl_get_global_steps = timeline.Timeline(run_metadata.step_stats)
+          ctf_get_global_steps = tl_get_global_steps.generate_chrome_trace_format()
+          with open('/tmp/lingvo/timeline_get_global_steps.json', 'w') as f:
+            f.write(ctf_get_global_steps)
 
         def RunSave(sess, global_step):
           # Run TPU embedding retrieve ops.
           # NOTE: this is expensive, so only run it when we're checkpointing.
           if not py_utils.IsEagerMode():
             tf.logging.info('Retrieve params.')
-            sess.run(self._retrieve_ops)
+            # sess.run(self._retrieve_ops)
+            sess.run(self._retrieve_ops, options=run_options, run_metadata=run_metadata)
+            tl_retrieve_ops = timeline.Timeline(run_metadata.step_stats)
+            ctf_retrieve_ops = tl_retrieve_ops.generate_chrome_trace_format()
+            with open('/tmp/lingvo/timeline_retrieve_ops.json', 'w') as f:
+              f.write(ctf_retrieve_ops)
             tf.logging.info('Retrieve params done.')
 
           # Save program state first, so it's recoverable after we restore
