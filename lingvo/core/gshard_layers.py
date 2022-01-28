@@ -2548,6 +2548,7 @@ def FeedForwardNetworksApplyGating(gating,
       name='expert_inputs_eam')
   expert_inputs = _NewOrHistoricSplit(expert_inputs, eam_split)
 
+  ################################################################################
   if use_glu:
     h = _Einsum('KEMH,EAM->KEAH', wi_split, expert_inputs)
     o1, o2 = [tf.squeeze(o, 0) for o in tf.split(h, 2, 0)]
@@ -2580,6 +2581,8 @@ def FeedForwardNetworksApplyGating(gating,
       _EinsumEqWithModelDim('EGCM->GECM', model_dim_reshape_segments),
       expert_outputs,
       name='expert_outputs_gecm')
+
+  ###########################################################################################
 
   t_combine_start = time.time()
   if gating_func == 'token_shuffle':
