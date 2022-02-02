@@ -1997,18 +1997,11 @@ def Top2GatingOnLogits(inputs,
                      tf.cast(mask_1, raw_gates.dtype), name='gate1_einsum')
   gates_without_top_1 = raw_gates * (1.0 - tf.cast(mask_1, raw_gates.dtype))
 
-  tf.logging.info('###############################################')
-  tf.logging.info('###############################################')
-  tf.logging.info('###############################################')
-  tf.logging.info('###############################################')
-  tf.logging.info(index_1)
-  tf.logging.info(mask_1)
-  tf.logging.info(gate_1)
-  tf.logging.info(gates_without_top_1)
-  tf.logging.info('###############################################')
-  tf.logging.info('###############################################')
-  tf.logging.info('###############################################')
-  tf.logging.info('###############################################')
+  # Confirmed: Unable to print useful stuffs
+  # tf.logging.info(index_1)
+  # tf.logging.info(mask_1)
+  # tf.logging.info(gate_1)
+  # tf.logging.info(gates_without_top_1)
 
   if second_expert_policy == 'sampling':
     # We directly sample the 2nd expert index from the softmax over of the 2nd
@@ -2042,17 +2035,10 @@ def Top2GatingOnLogits(inputs,
   gate_2 = tf.einsum('...GSE,...GSE->...GS', gates_without_top_1,
                      tf.cast(mask_2, gates_without_top_1.dtype), name='gate2_einsum')
 
-  tf.logging.info('###############################################')
-  tf.logging.info('###############################################')
-  tf.logging.info('###############################################')
-  tf.logging.info('###############################################')
-  tf.logging.info(index_2)
-  tf.logging.info(mask_2)
-  tf.logging.info(gate_2)
-  tf.logging.info('###############################################')
-  tf.logging.info('###############################################')
-  tf.logging.info('###############################################')
-  tf.logging.info('###############################################')
+  # Confirmed: Unable to print useful stuffs
+  # tf.logging.info(index_2)
+  # tf.logging.info(mask_2)
+  # tf.logging.info(gate_2)
 
   if legacy_mtf_behavior:
     # cl/298510175 moved this branch for gate_{1,2} denom calculation here.
@@ -2237,14 +2223,10 @@ def Top2GatingOnLogits(inputs,
   second_part_of_combine_tensor = tf.einsum(
       '...GSE,...GSC->...GSEC', a, b, name='second_part_of_combine_tensor')
 
-  tf.logging.info('###############################################')
-  tf.logging.info('###############################################')
-  tf.logging.info('###############################################')
-  tf.logging.info(first_part_of_combine_tensor)
-  tf.logging.info(second_part_of_combine_tensor)
-  tf.logging.info('###############################################')
-  tf.logging.info('###############################################')
-  tf.logging.info('###############################################')
+  # Confirmed: Unable to print useful stuffs
+  # tf.logging.info(first_part_of_combine_tensor)
+  # tf.logging.info(second_part_of_combine_tensor)
+
   # GSEC Tensor
   combine_tensor = tf.math.add(
       first_part_of_combine_tensor,
