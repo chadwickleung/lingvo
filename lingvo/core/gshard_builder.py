@@ -1838,7 +1838,7 @@ class MoEBuilder(builder.Base):
           # independently for each group and inputs are typically sharded by
           # group dimension.
           gating_func=p.gating_func,
-          use_xla_sharding=False,  # Chadwick: Should we turn this to True?
+          use_xla_sharding=True,  # Chadwick: Should we turn this to True?
           second_expert_policy=p.second_expert_policy,
           second_expert_threshold=p.second_expert_threshold,
           legacy_mtf_behavior=p.legacy_mtf_behavior,

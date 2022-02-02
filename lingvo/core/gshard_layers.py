@@ -2198,6 +2198,8 @@ def Top2GatingOnLogits(inputs,
   a = tf.expand_dims(gate_2 * tf.cast(mask_2_flat, fprop_dtype),
                      -1) * tf.one_hot(
                          index_2, experts_dim, dtype=fprop_dtype)
+
+  # Chadwick: Second part of the combine tensor isn't showing up
   second_part_of_combine_tensor = tf.einsum(
       '...GSE,...GSC->...GSEC', a, b, name='second_part_of_combine_tensor')
 
@@ -2363,7 +2365,7 @@ def ComputeGating(w,
   if gating_logits_dtype is None or gating_logits_dtype == fprop_dtype:
     t_gate_einsum_start = time.time()
     logits = EinsumWithModelDim('GSM,ME->GSE', inputs, w,
-                                model_dim_reshape_segments)
+                                model_dim_reshape_segments, name='gating_einsum')
   else:
     t_gate_einsum_start = time.time()
     logits = EinsumWithModelDim(
