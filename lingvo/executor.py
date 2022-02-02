@@ -107,7 +107,9 @@ def GetExecutorParams(model_name, cluster_params, model_registry):
           tf.logging.fatal(
               'Could not find %s in ps_cfg.program_schedule_dict: %s', k,
               ps_cfg)
-        program_schedule_params = ps_cfg.program_schedule_dict[k]
+        # Add Copy in case a user is sharing the same ProgramSchedule params
+        # instance across different tasks.
+        program_schedule_params = ps_cfg.program_schedule_dict[k].Copy()
 
         program_schedule_params.task_dict = {'Train': train_task_params}
 
@@ -311,6 +313,7 @@ class ExecutorTpu(base_runner.BaseRunner):
 
     self._program_schedule_dict = {}
     self._programs = []
+    self._ckpt_programs = []
 
     self._checkpoint_to_load = None
     with self._cluster:
@@ -343,6 +346,10 @@ class ExecutorTpu(base_runner.BaseRunner):
         # Confirmed: self._programs should only contain train_programs
         # ps.Programs() returns train_programs that was set in the above instantiation
         self._programs += ps.Programs()
+        if ps.train_program:
+          self._ckpt_programs.append(ps.train_program)
+        else:
+          self._ckpt_programs += ps.Programs()
         if program_schedule_params.ml_perf.benchmark_name is not None:
           self._ml_perf = program_schedule_params.ml_perf
         if ('checkpoint_to_load' in program_schedule_params and
@@ -385,7 +392,9 @@ class ExecutorTpu(base_runner.BaseRunner):
         self._initialize_local_vars = tf.local_variables_initializer()
         self._initialize_global_vars = tf.global_variables_initializer()
 
-      checkpointer_models = [program.GetModel() for program in self._programs]
+      checkpointer_models = [
+          program.GetModel() for program in self._ckpt_programs
+      ]
 
       if py_utils.IsEagerMode():
         if FLAGS.use_v2_checkpoints_in_eager:
