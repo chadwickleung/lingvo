@@ -66,7 +66,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
   LABEL_SMOOTHING = 0.0
   VOCAB_SIZE = 32000
   # The sharding config of model parallelim
-  DEVICE_MESH_SHAPE = [64, 1]  # prod(DEVICE_MESH_SHAPE) = NUM_DEVICES_PER_SPLIT
+  DEVICE_MESH_SHAPE = [1, 64]  # prod(DEVICE_MESH_SHAPE) = NUM_DEVICES_PER_SPLIT; was [64, 1]
   DEVICE_MESH = None
   DEBUG = False
   ATTEN_LOGIT_CAP = 0
@@ -78,6 +78,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
   TRAIN_STEPS_PER_LOOP = 100  # _steps_per_loop param
   MOE = True
   MOE_HIDDEN_DIM = MODEL_DIM
+  NUM_DEVICES = NUM_DEVICES_PER_SPLIT // 8
 
   def Task(self):
     # tokens per batch per replica (~64 cores)
@@ -108,7 +109,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             atten_logit_cap=self.ATTEN_LOGIT_CAP,
             attention_logits_dtype=tf.float32,
             dropout_rate=0.0,
-            num_devices=1,  # Obsolete params, originally = 1
+            num_devices=self.NUM_DEVICES,  # Obsolete params, originally = 1
             attention_dropout_prob=0.0,
             attention_key_value_dim=self.ATTENTION_KEY_VALUE_DIM,
             attention_extra_logit=0.0,
@@ -119,8 +120,8 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             ff_dim=self.HIDDEN_DIM,
             attention_combine_dims=True,
             moe_hidden_dim = self.MOE_HIDDEN_DIM,
-            second_expert_policy = 'sampling',
-            num_groups = 4,  # Chadwick: Code was not using num_groups, they use num_devices
+            # second_expert_policy = 'sampling',
+            # num_groups = 4,  # Chadwick: Code was not using num_groups, they use num_devices
             e_dim = self.NUM_DEVICES_PER_SPLIT if self.MOE else None,  # Chadwick: number of experts
             c_dim = expert_capacity if self.MOE else None), # Chadwick: Required us to set it to 0
 
@@ -173,14 +174,17 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
 
 @model_registry.RegisterSingleTaskModel
 class DenseLm64B2x2(DenseLmTemplate):
+  SEQUENCE_LENGTH = 1024
+  NUM_DEVICES_PER_SPLIT = 64 
+  BATCH_DIM_PER_DEVICE = 0.25
   NUM_TRANSFORMER_LAYERS = 4  # (was 4) 2 blocks of [[DecSelfAttention, MoE], [DecSelfAttention, DenseReluDense]]
-  DEVICE_MESH_SHAPE = [1, 8]
-  DEVICE_MESH = np.arange(8).reshape(DEVICE_MESH_SHAPE)
+  DEVICE_MESH_SHAPE = [4, 16]
+  DEVICE_MESH = gshard_utils.GetNonPod2dMesh(DEVICE_MESH_SHAPE, [4, 8, 2]) 
 
   def Task(self):
     p = super().Task()
     p.train.tpu_device_order_mode = 2  # DeviceOrderMode.MESH
-    p.builder.model_dim_reshape_segments = self.DEVICE_MESH_SHAPE[1]  # = 8
+    p.builder.model_dim_reshape_segments = self.DEVICE_MESH_SHAPE[1]
     p.builder.emb_w_split = [-1, 1]
     p.builder.emb_out_split = [0, -1, 1]
     p.builder.blm_split = [0, -1, 1]
