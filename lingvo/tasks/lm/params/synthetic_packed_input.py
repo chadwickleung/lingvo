@@ -83,9 +83,10 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
     # tokens per batch per replica (~64 cores)
     batch_size_per_tf_replica = int(self.BATCH_DIM_PER_DEVICE *
                                     self.NUM_DEVICES_PER_SPLIT)
-    expert_capacity = batch_size_per_tf_replica // self.NUM_DEVICES_PER_SPLIT
-    if expert_capacity < 2:
-      expert_capacity = 2
+    # expert_capacity = batch_size_per_tf_replica // self.NUM_DEVICES_PER_SPLIT
+    # if expert_capacity < 2:
+    #   expert_capacity = 2
+    expert_capacity = 8
 
     p = gshard_builder.UniTransformer.Params().Set(
         gated_gelu=self.GATED_GELU,
@@ -118,7 +119,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             ff_dim=self.HIDDEN_DIM,
             attention_combine_dims=True,
             moe_hidden_dim = self.MOE_HIDDEN_DIM,
-            second_expert_policy = 'sampling',
+            # second_expert_policy = 'sampling',
             num_groups = 4,  # Chadwick: Code was not using num_groups, they use num_devices
             e_dim = self.NUM_DEVICES_PER_SPLIT if self.MOE else None,  # Chadwick: number of experts
             c_dim = 2 if self.MOE else None), # Chadwick: Required us to set it to 0
@@ -175,8 +176,8 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
 class DenseLm8B2x2(DenseLmTemplate):
   """8B params LM model with 1D split."""
   SEQUENCE_LENGTH = 1024
-  NUM_DEVICES_PER_SPLIT = 8  # it was 128 
-  BATCH_DIM_PER_DEVICE = 0.5  # it was 0.125
+  NUM_DEVICES_PER_SPLIT = 128  # it was 128 
+  BATCH_DIM_PER_DEVICE = 0.125  # it was 0.125
   NUM_TRANSFORMER_LAYERS = 4  # (was 4) 2 blocks of [[DecSelfAttention, MoE], [DecSelfAttention, DenseReluDense]]
   DEVICE_MESH_SHAPE = [1, 8]
   DEVICE_MESH = np.arange(8).reshape(DEVICE_MESH_SHAPE)
