@@ -7,5 +7,4 @@ echo Show TPU availability
 gcloud alpha compute tpus list --zone=europe-west4-a
 echo Start docker
 export TPU_NAME=gshard-node
-sudo docker run --rm -it -v /home/$(whoami)/lingvo:/tmp/lingvo -e TPU_NAME=${TPU_NAME} --name
- lingvo tensorflow:lingvo_dev_lm bash
+sudo docker run --rm -it -v /home/$(whoami)/lingvo:/tmp/lingvo -e TPU_NAME=${TPU_NAME} --name lingvo tensorflow:lingvo_dev_lm bash
