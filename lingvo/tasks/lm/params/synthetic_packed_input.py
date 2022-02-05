@@ -122,7 +122,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             # second_expert_policy = 'sampling',
             num_groups = 4,  # Chadwick: Code was not using num_groups, they use num_devices
             e_dim = self.NUM_DEVICES_PER_SPLIT if self.MOE else None,  # Chadwick: number of experts
-            c_dim = 2 if self.MOE else None), # Chadwick: Required us to set it to 0
+            c_dim = expert_capacity if self.MOE else None), # Chadwick: Required us to set it to 0
 
         batch_size=batch_size_per_tf_replica,
         sequence_length=self.SEQUENCE_LENGTH,
@@ -171,12 +171,27 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
     p.train_executions_per_eval = 5
     return p
 
+@model_registry.RegisterSingleTaskModel
+class DenseLm64B2x2(DenseLmTemplate):
+  NUM_TRANSFORMER_LAYERS = 4  # (was 4) 2 blocks of [[DecSelfAttention, MoE], [DecSelfAttention, DenseReluDense]]
+  DEVICE_MESH_SHAPE = [1, 8]
+  DEVICE_MESH = np.arange(8).reshape(DEVICE_MESH_SHAPE)
+
+  def Task(self):
+    p = super().Task()
+    p.train.tpu_device_order_mode = 2  # DeviceOrderMode.MESH
+    p.builder.model_dim_reshape_segments = self.DEVICE_MESH_SHAPE[1]  # = 8
+    p.builder.emb_w_split = [-1, 1]
+    p.builder.emb_out_split = [0, -1, 1]
+    p.builder.blm_split = [0, -1, 1]
+    p.builder.logits_split = [0, -1, 1]
+    return p
 
 @model_registry.RegisterSingleTaskModel
 class DenseLm8B2x2(DenseLmTemplate):
   """8B params LM model with 1D split."""
   SEQUENCE_LENGTH = 1024
-  NUM_DEVICES_PER_SPLIT = 128  # it was 128 
+  NUM_DEVICES_PER_SPLIT = 8  # it was 128 
   BATCH_DIM_PER_DEVICE = 0.125  # it was 0.125
   NUM_TRANSFORMER_LAYERS = 4  # (was 4) 2 blocks of [[DecSelfAttention, MoE], [DecSelfAttention, DenseReluDense]]
   DEVICE_MESH_SHAPE = [1, 8]
