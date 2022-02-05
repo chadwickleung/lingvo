@@ -32,13 +32,10 @@ from tensorflow.compiler.tf2xla.python import xla
 from tensorflow.compiler.xla.experimental.xla_sharding import xla_sharding
 # pylint: enable=g-direct-tensorflow-import
 
-<<<<<<< HEAD
 import wandb
 import time
 
 
-=======
->>>>>>> 240c85018f580ea257c91f5e7d30ce7fa1aab13d
 Split = gshard_utils.Split
 MeshSplit = gshard_utils.MeshSplit
 ZigzagOrderOnDeviceMesh = gshard_utils.ZigzagOrderOnDeviceMesh
@@ -1921,6 +1918,7 @@ def Top2GatingOnLogits(inputs,
       # Round up to a multiple of 4 to avoid possible padding.
       while expert_capacity_dim % 4:
         expert_capacity_dim += 1
+      # Chadwick: Maybe can ignore?
       tf.logging.info(
           'Setting expert_capacity_dim=%r (capacity_factor=%r '
           'group_size_dim=%r experts_dim=%r name_scope=%r)',
@@ -1964,7 +1962,7 @@ def Top2GatingOnLogits(inputs,
   # GS
   index_1 = tf.math.argmax(raw_gates, axis=-1, output_type=tf.int32)
   
-    # Chadwick: Ignore if not using use_xla_sharding
+  # Chadwick: Ignore if not using use_xla_sharding
   index_1 = _MaybeSplit(index_1)
   tpu_summary.tensor('index_1', index_1)
 
@@ -1976,6 +1974,7 @@ def Top2GatingOnLogits(inputs,
   mask_1 = _MaybeSplit(mask_1)
   density_1_proxy = raw_gates
 
+  # Confirmed: importance is None
   if importance is not None:
     importance_is_one = tf.equal(importance, 1.0)
     mask_1 *= tf.expand_dims(tf.cast(importance_is_one, mask_1.dtype), -1)
