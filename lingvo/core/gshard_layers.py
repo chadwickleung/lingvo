@@ -2035,7 +2035,21 @@ def Top2GatingOnLogits(inputs,
                      tf.cast(mask_2, gates_without_top_1.dtype), name='gate2_einsum')
 
   # Confirmed: Unable to print useful stuffs
-  # tf.logging.info(index_2)
+  tf.logging.info('########################################')
+  tf.logging.info('########################################')
+  tf.logging.info('########################################')
+  tf.logging.info('########################################')
+  tf.logging.info('########################################')
+  tf.logging.info('########################################')
+  tf.logging.info(index_1)
+  tf.logging.info(index_2)
+  tf.logging.info('########################################')
+  tf.logging.info('########################################')
+  tf.logging.info('########################################')
+  tf.logging.info('########################################')
+  tf.logging.info('########################################')
+  tf.logging.info('########################################')
+
   # tf.logging.info(mask_2)
   # tf.logging.info(gate_2)
 
@@ -2098,7 +2112,7 @@ def Top2GatingOnLogits(inputs,
   #
   # tf.cumsum over S dim: mask_1 is ...GSE tensor. Pontentially with outer_dim
   # O.
-  position_in_expert_1 = tf.cumsum(mask_1, exclusive=True, axis=-2)
+  position_in_expert_1 = tf.cumsum(mask_1, exclusive=True, axis=-2, name='position_in_expert_1')
 
   # GS Tensor
   capacity = tf.cast(expert_capacity_dim, dtype=position_in_expert_1.dtype)
@@ -2131,12 +2145,12 @@ def Top2GatingOnLogits(inputs,
 
   mask_1 *= tf.cast(tf.less(position_in_expert_1, capacity), dtype=mask_1.dtype)
   position_in_expert_1 = tf.einsum('...GSE,...GSE->...GS', position_in_expert_1,
-                                   mask_1)
+                                   mask_1, name='position_in_expert_1_einsum')
 
   # How many examples in this sequence go to this expert
-  mask_1_count = tf.einsum('...GSE->...GE', mask_1)
+  mask_1_count = tf.einsum('...GSE->...GE', mask_1, name='mask_1_count')
   # [batch, group] - mostly ones, but zeros where something didn't fit
-  mask_1_flat = tf.einsum('...GSE->...GS', mask_1)
+  mask_1_flat = tf.einsum('...GSE->...GS', mask_1, name='mask_1_flat')
   assert mask_1_count.dtype == mask_dtype
   assert mask_1_flat.dtype == mask_dtype
 
@@ -2172,7 +2186,7 @@ def Top2GatingOnLogits(inputs,
 
   mask_2 *= tf.cast(tf.less(position_in_expert_2, capacity), mask_2.dtype)
   position_in_expert_2 = tf.einsum('...GSE,...GSE->...GS', position_in_expert_2,
-                                   mask_2)
+                                   mask_2, name='position_in_expert_2_einsum')
   mask_2_flat = tf.reduce_sum(mask_2, axis=-1)
 
   # Equivalent non-einsum implementation:
