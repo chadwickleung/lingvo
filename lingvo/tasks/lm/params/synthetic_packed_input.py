@@ -77,7 +77,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
   USE_REPEAT_LAYER = False
   TRAIN_STEPS_PER_LOOP = 100  # _steps_per_loop param
   MOE = True
-  MOE_HIDDEN_DIM = MODEL_DIM // 2
+  MOE_HIDDEN_DIM = MODEL_DIM // 8
   NUM_DEVICES = NUM_DEVICES_PER_SPLIT // 8
 
   def Task(self):
