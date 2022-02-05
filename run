@@ -3,4 +3,4 @@ git pull
 echo Define cloud bucket
 export LOGDIR=gs://gshard-train-bucket
 echo Run model training
-bazel run -c opt //lingvo:trainer -- --mode=sync --alsologtostderr --model=lm.synthetic_packed_input.DenseLm64B2x2 --logdir=${LOGDIR} --tpu=${TPU_NAME} --worker_split_size=8 --ps_replicas=1 --job=executor_tpu  --disable_tf2=true
+bazel run -c opt //lingvo:trainer -- --mode=sync --alsologtostderr --model=lm.synthetic_packed_input.DenseLm64B2x2 --logdir=${LOGDIR} --tpu=${TPU_NAME} --worker_split_size=64 --ps_replicas=8 --job=executor_tpu  --disable_tf2=true
