@@ -1,11 +1,11 @@
 echo Set config region and zone
-gcloud config set compute/region us-central1
-gcloud config set compute/zone us-central1-a
+gcloud config set compute/region europe-west4
+gcloud config set compute/zone europe-west4-a
 echo Show config
 gcloud config list
 echo Show TPU availability
-gcloud alpha compute tpus list --zone=us-central1-a
+gcloud alpha compute tpus list --zone=europe-west4-a
 echo Start docker
-export TPU_NAME=gshard-tpu
+export TPU_NAME=gshard-node
 sudo docker run --rm -it -v /home/$(whoami)/lingvo:/tmp/lingvo -e TPU_NAME=${TPU_NAME} --name
  lingvo tensorflow:lingvo_dev_lm bash
