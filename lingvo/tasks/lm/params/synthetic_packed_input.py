@@ -109,7 +109,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             atten_logit_cap=self.ATTEN_LOGIT_CAP,
             attention_logits_dtype=tf.float32,
             dropout_rate=0.0,
-            num_devices=8,  # Obsolete params, originally = 1
+            num_devices=1,  # Obsolete params, originally = 1
             attention_dropout_prob=0.0,
             attention_key_value_dim=self.ATTENTION_KEY_VALUE_DIM,
             attention_extra_logit=0.0,
@@ -121,7 +121,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             attention_combine_dims=True,
             moe_hidden_dim = self.MOE_HIDDEN_DIM,
             # second_expert_policy = 'sampling',
-            # num_groups = 4,  # Chadwick: Code was not using num_groups, they use num_devices
+            num_groups = 8,  # Chadwick: Code was not using num_groups, they use num_devices
             e_dim = self.NUM_DEVICES_PER_SPLIT if self.MOE else None,  # Chadwick: number of experts
             c_dim = expert_capacity if self.MOE else None), # Chadwick: Required us to set it to 0
 
