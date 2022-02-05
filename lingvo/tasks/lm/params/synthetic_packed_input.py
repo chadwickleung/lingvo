@@ -192,7 +192,7 @@ class DenseLm8B2x2(DenseLmTemplate):
   """8B params LM model with 1D split."""
   SEQUENCE_LENGTH = 1024
   NUM_DEVICES_PER_SPLIT = 8  # it was 128 
-  BATCH_DIM_PER_DEVICE = 0.125  # it was 0.125
+  BATCH_DIM_PER_DEVICE = 0.5  # it was 0.125
   NUM_TRANSFORMER_LAYERS = 4  # (was 4) 2 blocks of [[DecSelfAttention, MoE], [DecSelfAttention, DenseReluDense]]
   DEVICE_MESH_SHAPE = [1, 8]
   DEVICE_MESH = np.arange(8).reshape(DEVICE_MESH_SHAPE)
