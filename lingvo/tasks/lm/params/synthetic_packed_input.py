@@ -109,7 +109,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             atten_logit_cap=self.ATTEN_LOGIT_CAP,
             attention_logits_dtype=tf.float32,
             dropout_rate=0.0,
-            num_devices=self.NUM_DEVICES,  # Obsolete params, originally = 1
+            num_devices=8,  # Obsolete params, originally = 1
             attention_dropout_prob=0.0,
             attention_key_value_dim=self.ATTENTION_KEY_VALUE_DIM,
             attention_extra_logit=0.0,
