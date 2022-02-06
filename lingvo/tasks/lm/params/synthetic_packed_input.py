@@ -34,7 +34,7 @@ class SyntheticTrain(base_input_generator.BaseInputGenerator):
   def Params(cls):
     """Defaults params for input generators."""
     p = super().Params()
-    p.Define('seq_len', 0, 'Number of tokens in one example')
+    p.Define('seq_len', 16, 'Number of tokens in one example')  # Was 0
     return p
 
   def _InputBatch(self):
@@ -54,14 +54,14 @@ class SyntheticTrain(base_input_generator.BaseInputGenerator):
 class DenseLmTemplate(base_model_params.SingleTaskModelParams):
   """DenseBuilder-based LM Template."""
   # Batch size per replica = BATCH_DIM_PER_DEVICE * NUM_DEVICES_PER_SPLIT
-  BATCH_DIM_PER_DEVICE = 0.0625
+  BATCH_DIM_PER_DEVICE = 0.0625  # this is how much data each device takes as input
   NUM_DEVICES_PER_SPLIT = 64  # number of devices per data replica.
   SEQUENCE_LENGTH = 1024
 
-  HIDDEN_DIM = 65536
-  ATTENTION_KEY_VALUE_DIM = 128
-  MODEL_DIM = 8192
-  NUM_HEADS = 128
+  HIDDEN_DIM = 65536 // 4 # Was 65536
+  ATTENTION_KEY_VALUE_DIM = 16 # Was 128
+  MODEL_DIM = 2048 # Was 8192
+  NUM_HEADS = 16 # Was 128
   NUM_TRANSFORMER_LAYERS = 32
   LABEL_SMOOTHING = 0.0
   VOCAB_SIZE = 32000
@@ -74,7 +74,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
 
   GATED_GELU = True
   POSITIONAL_EMBEDDING = False
-  USE_REPEAT_LAYER = False
+  USE_REPEAT_LAYER = False  # Whether to use RepeatLayer to wrap the layer stack
   TRAIN_STEPS_PER_LOOP = 100  # _steps_per_loop param
   MOE = True
   MOE_HIDDEN_DIM = MODEL_DIM // 8
@@ -87,7 +87,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
     # expert_capacity = batch_size_per_tf_replica // self.NUM_DEVICES_PER_SPLIT
     # if expert_capacity < 2:
     #   expert_capacity = 2
-    expert_capacity = 8
+    expert_capacity = batch_size_per_tf_replica // self.NUM_DEVICES_PER_SPLIT
 
     p = gshard_builder.UniTransformer.Params().Set(
         gated_gelu=self.GATED_GELU,
@@ -119,9 +119,10 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             attention_num_heads=self.NUM_HEADS,
             ff_dim=self.HIDDEN_DIM,
             attention_combine_dims=True,
-            moe_hidden_dim = self.MOE_HIDDEN_DIM,
-            # second_expert_policy = 'sampling',
-            num_groups = 8,  # Chadwick: Code was not using num_groups, they use num_devices
+            moe_hidden_dim = self.MOE_HIDDEN_DIM if self.MOE else None,
+            # capacity_factor = self.NUM_DEVICES_PER_SPLIT if self.MOE else None,
+            # second_expert_policy = 'sampling' if self.MOE else None,  # Uses 'all' if not specify
+            num_groups = 2 if self.MOE else None,  # Chadwick: Code was not using num_groups, they use num_devices == 1
             e_dim = self.NUM_DEVICES_PER_SPLIT if self.MOE else None,  # Chadwick: number of experts
             c_dim = expert_capacity if self.MOE else None), # Chadwick: Required us to set it to 0
 
@@ -196,7 +197,7 @@ class DenseLm8B2x2(DenseLmTemplate):
   """8B params LM model with 1D split."""
   SEQUENCE_LENGTH = 1024
   NUM_DEVICES_PER_SPLIT = 8  # it was 128 
-  BATCH_DIM_PER_DEVICE = 0.5  # it was 0.125
+  BATCH_DIM_PER_DEVICE = 2 # it was 0.125 Chadwick: My guess is that now the total batch size is 16
   NUM_TRANSFORMER_LAYERS = 4  # (was 4) 2 blocks of [[DecSelfAttention, MoE], [DecSelfAttention, DenseReluDense]]
   DEVICE_MESH_SHAPE = [1, 8]
   DEVICE_MESH = np.arange(8).reshape(DEVICE_MESH_SHAPE)

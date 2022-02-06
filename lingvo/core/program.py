@@ -257,18 +257,8 @@ class BaseProgram:
     """Infeed loop for input generator for batched data and input data stats."""
     tf.logging.info(f'_InfeedLoop start {self._program_name} '
                     f'on dataset {self.params.dataset_name}')
-    run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-    run_metadata = tf.RunMetadata()
-    tf.logging.info('**********************************************')
-    tf.logging.info('**********************************************')
-    tf.logging.info('**********************************************')
-    tf.logging.info('**********************************************')
-    tf.logging.info('Run in 3 seconds')
-    tf.logging.info('**********************************************')
-    tf.logging.info('**********************************************')
-    tf.logging.info('**********************************************')
-    tf.logging.info('**********************************************')
-    time.sleep(3)
+    # run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+    # run_metadata = tf.RunMetadata()
     tf.logging.info('Infeed Loop Starts')
     try:
       for i in range(self._steps_per_loop):
