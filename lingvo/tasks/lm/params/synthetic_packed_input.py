@@ -58,9 +58,9 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
   NUM_DEVICES_PER_SPLIT = 64  # number of devices per data replica.
   SEQUENCE_LENGTH = 1024
 
-  HIDDEN_DIM = 65536 // 4 # Was 65536
+  HIDDEN_DIM = 8192 # Was 65536
   ATTENTION_KEY_VALUE_DIM = 16 # Was 128
-  MODEL_DIM = 2048 # Was 8192
+  MODEL_DIM = 1024 # Was 8192
   NUM_HEADS = 16 # Was 128
   NUM_TRANSFORMER_LAYERS = 32
   LABEL_SMOOTHING = 0.0
