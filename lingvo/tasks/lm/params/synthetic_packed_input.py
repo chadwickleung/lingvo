@@ -122,7 +122,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             moe_hidden_dim = self.MOE_HIDDEN_DIM if self.MOE else None,
             # capacity_factor = self.NUM_DEVICES_PER_SPLIT if self.MOE else None,
             # second_expert_policy = 'sampling' if self.MOE else None,  # Uses 'all' if not specify
-            num_groups = 2 if self.MOE else None,  # Chadwick: Code was not using num_groups, they use num_devices == 1
+            num_groups = 4 if self.MOE else None,  # Chadwick: Code was not using num_groups, they use num_devices == 1
             e_dim = self.NUM_DEVICES_PER_SPLIT if self.MOE else None,  # Chadwick: number of experts
             c_dim = expert_capacity if self.MOE else None), # Chadwick: Required us to set it to 0
 
@@ -197,7 +197,7 @@ class DenseLm8B2x2(DenseLmTemplate):
   """8B params LM model with 1D split."""
   SEQUENCE_LENGTH = 1024
   NUM_DEVICES_PER_SPLIT = 8  # it was 128 
-  BATCH_DIM_PER_DEVICE = 2 # it was 0.125 Chadwick: My guess is that now the total batch size is 16
+  BATCH_DIM_PER_DEVICE = 8 # it was 0.125 Chadwick: My guess is that now the total batch size is 16
   NUM_TRANSFORMER_LAYERS = 4  # (was 4) 2 blocks of [[DecSelfAttention, MoE], [DecSelfAttention, DenseReluDense]]
   DEVICE_MESH_SHAPE = [1, 8]
   DEVICE_MESH = np.arange(8).reshape(DEVICE_MESH_SHAPE)
