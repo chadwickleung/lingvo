@@ -1990,20 +1990,23 @@ def Top2GatingOnLogits(inputs,
     density_1_proxy *= tf.expand_dims(
         tf.cast(importance_is_one, density_1_proxy.dtype), -1)
   else:
+    # Confirmed: len(mask_1.shape) = 3
     if len(mask_1.shape) == 3:
-      tf.logging.info('############################################################')
-      tf.logging.info('############################################################')
-      tf.logging.info('len of mask_1.shape == 3')
+      # tf.logging.info('############################################################')
+      # tf.logging.info('############################################################')
+      # tf.logging.info('len of mask_1.shape == 3')
       importance = tf.ones_like(mask_1[:, :, 0])
     else:
-      tf.logging.info('############################################################')
-      tf.logging.info('############################################################')
-      tf.logging.info('len mask_1.shape != 3')
+      # tf.logging.info('############################################################')
+      # tf.logging.info('############################################################')
+      # tf.logging.info('len mask_1.shape != 3')
       importance = tf.ones_like(mask_1[:, :, :, 0])
+      
+    # Confirmed: padding is not None
     if paddings is not None:
-      tf.logging.info('############################################################')
-      tf.logging.info('############################################################')
-      tf.logging.info('padding is not None')
+      # tf.logging.info('############################################################')
+      # tf.logging.info('############################################################')
+      # tf.logging.info('padding is not None')
       nonpaddings = 1.0 - paddings
       mask_1 *= tf.expand_dims(tf.cast(nonpaddings, mask_1.dtype), -1)
       density_1_proxy *= tf.expand_dims(
