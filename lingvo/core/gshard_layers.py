@@ -2066,12 +2066,13 @@ def Top2GatingOnLogits(inputs,
   # Chadwick: Seems like the 2 indices are both 0 (the argmax)
   tf.logging.info('############################################################')
   tf.logging.info('############################################################')
-  tf.logging.info(index_1)
-  tf.logging.info(index_2)
+  tf.logging.info(gate_1)
+  tf.logging.info(gate_2)
 
   # tf.logging.info(mask_2)
   # tf.logging.info(gate_2)
 
+  # Confirmed: is True
   if legacy_mtf_behavior:
     # cl/298510175 moved this branch for gate_{1,2} denom calculation here.
     #

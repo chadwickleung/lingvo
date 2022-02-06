@@ -87,7 +87,8 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
     # expert_capacity = batch_size_per_tf_replica // self.NUM_DEVICES_PER_SPLIT
     # if expert_capacity < 2:
     #   expert_capacity = 2
-    expert_capacity = batch_size_per_tf_replica // self.NUM_DEVICES_PER_SPLIT
+    # expert_capacity = batch_size_per_tf_replica // self.NUM_DEVICES_PER_SPLIT
+    expert_capacity = batch_size_per_tf_replica
 
     p = gshard_builder.UniTransformer.Params().Set(
         gated_gelu=self.GATED_GELU,
