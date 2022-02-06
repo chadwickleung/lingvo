@@ -2035,20 +2035,21 @@ def Top2GatingOnLogits(inputs,
                      tf.cast(mask_2, gates_without_top_1.dtype), name='gate2_einsum')
 
   # Confirmed: Unable to print useful stuffs
-  tf.logging.info('########################################')
-  tf.logging.info('########################################')
-  tf.logging.info('########################################')
-  tf.logging.info('########################################')
-  tf.logging.info('########################################')
-  tf.logging.info('########################################')
-  tf.logging.info(index_1)
-  tf.logging.info(index_2)
-  tf.logging.info('########################################')
-  tf.logging.info('########################################')
-  tf.logging.info('########################################')
-  tf.logging.info('########################################')
-  tf.logging.info('########################################')
-  tf.logging.info('########################################')
+  # Chadwick: Seems like the 2 indices are both 0 (the argmax)
+  # tf.logging.info('########################################')
+  # tf.logging.info('########################################')
+  # tf.logging.info('########################################')
+  # tf.logging.info('########################################')
+  # tf.logging.info('########################################')
+  # tf.logging.info('########################################')
+  # tf.logging.info(index_1)
+  # tf.logging.info(index_2)
+  # tf.logging.info('########################################')
+  # tf.logging.info('########################################')
+  # tf.logging.info('########################################')
+  # tf.logging.info('########################################')
+  # tf.logging.info('########################################')
+  # tf.logging.info('########################################')
 
   # tf.logging.info(mask_2)
   # tf.logging.info(gate_2)
@@ -2248,6 +2249,8 @@ def Top2GatingOnLogits(inputs,
   combine_tensor = _MaybeSplit(combine_tensor)
 
   # GSEC Tensor
+  # Chadwick: From paper, dispatch tensor is produced from the combine tensor
+  # by casting all non-zero values to 1
   dispatch_tensor = tf.cast(
       tf.cast(combine_tensor, tf.bool), fprop_dtype, name='dispatch_tensor')
   dispatch_tensor = _MaybeSplit(dispatch_tensor)
