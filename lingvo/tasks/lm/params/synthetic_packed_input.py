@@ -176,7 +176,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
 class DenseLm64B2x2(DenseLmTemplate):
   SEQUENCE_LENGTH = 1024
   NUM_DEVICES_PER_SPLIT = 64 
-  BATCH_DIM_PER_DEVICE = 0.25
+  BATCH_DIM_PER_DEVICE = 0.125
   NUM_TRANSFORMER_LAYERS = 4  # (was 4) 2 blocks of [[DecSelfAttention, MoE], [DecSelfAttention, DenseReluDense]]
   DEVICE_MESH_SHAPE = [4, 16]
   DEVICE_MESH = gshard_utils.GetNonPod2dMesh(DEVICE_MESH_SHAPE, [4, 8, 2]) 
