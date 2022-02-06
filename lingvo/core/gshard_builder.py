@@ -1844,7 +1844,7 @@ class MoEBuilder(builder.Base):
           use_xla_sharding=False,  # Chadwick: Should we turn this to True? 
           second_expert_policy=p.second_expert_policy,
           second_expert_threshold=p.second_expert_threshold,
-          legacy_mtf_behavior=p.legacy_mtf_behavior,
+          legacy_mtf_behavior=False,  # Chadwick: was p.legacy_mtf_behavior
           capacity_factor=p.capacity_factor)
 
     return self._Fn(name, _Compute)
