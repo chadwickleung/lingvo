@@ -2001,7 +2001,7 @@ def Top2GatingOnLogits(inputs,
       # tf.logging.info('############################################################')
       # tf.logging.info('len mask_1.shape != 3')
       importance = tf.ones_like(mask_1[:, :, :, 0])
-      
+
     # Confirmed: padding is not None
     if paddings is not None:
       # tf.logging.info('############################################################')
@@ -2129,7 +2129,7 @@ def Top2GatingOnLogits(inputs,
     tf.logging.info('legacy_mtf_behavior is True')
     denom = gate_1 + gate_2 + 1e-9
     gate_1 /= denom
-    gate_2 /= denom
+    # gate_2 /= denom
 
   # We reshape the mask as [X*S, E], and compute cumulative sums of
   # assignment indicators for each expert index e \in 0..E-1 independently.
