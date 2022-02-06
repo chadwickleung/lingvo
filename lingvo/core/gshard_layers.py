@@ -2147,7 +2147,9 @@ def Top2GatingOnLogits(inputs,
   # density_1[:, e] represents assignment ratio (num assigned / total) to
   # expert e as top_1 expert without taking capacity into account.
   assert importance.dtype == fprop_dtype
-  if legacy_mtf_behavior:
+  ###########################################################################
+  # Chadwick: There was no not
+  if not legacy_mtf_behavior:
     density_denom = 1.0
   else:
     density_denom = tf.reduce_mean(importance, axis=(1))[:, tf.newaxis] + 1e-6
