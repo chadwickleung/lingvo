@@ -123,7 +123,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             moe_hidden_dim = self.MOE_HIDDEN_DIM if self.MOE else None,
             capacity_factor = 4 if self.MOE else None,
             # second_expert_policy = 'sampling' if self.MOE else None,  # Uses 'all' if not specify
-            num_groups = 4 if self.MOE else None,  # Chadwick: Code was not using num_groups, they use num_devices == 1
+            num_groups = 2 if self.MOE else None,  # Chadwick: Code was not using num_groups, they use num_devices == 1
             e_dim = self.NUM_DEVICES_PER_SPLIT if self.MOE else None,  # Chadwick: number of experts
             c_dim = expert_capacity if self.MOE else None), # Chadwick: Required us to set it to 0
 
