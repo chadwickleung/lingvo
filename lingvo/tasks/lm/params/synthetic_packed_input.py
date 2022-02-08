@@ -198,7 +198,7 @@ class DenseLm8B2x2(DenseLmTemplate):
   """8B params LM model with 1D split."""
   SEQUENCE_LENGTH = 1024
   NUM_DEVICES_PER_SPLIT = 8  # it was 128 
-  BATCH_DIM_PER_DEVICE = 16 # it was 0.125 Chadwick: My guess is that now the total batch size is 16
+  BATCH_DIM_PER_DEVICE = 8 # it was 0.125 Chadwick: My guess is that now the total batch size is 16
   NUM_TRANSFORMER_LAYERS = 4  # (was 4) 2 blocks of [[DecSelfAttention, MoE], [DecSelfAttention, DenseReluDense]]
   DEVICE_MESH_SHAPE = [1, 8]
   DEVICE_MESH = np.arange(8).reshape(DEVICE_MESH_SHAPE)
