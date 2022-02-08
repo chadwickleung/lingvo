@@ -207,10 +207,10 @@ class DenseLm8B2x2(DenseLmTemplate):
     p = super().Task()
     p.train.tpu_device_order_mode = 2  # DeviceOrderMode.MESH
     p.builder.model_dim_reshape_segments = self.DEVICE_MESH_SHAPE[1]  # = 8
-    # p.builder.emb_w_split = [-1, 1]
-    # p.builder.emb_out_split = [0, -1, 1]
-    # p.builder.blm_split = [0, -1, 1]
-    # p.builder.logits_split = [0, -1, 1]
+    p.builder.emb_w_split = [-1, 1]
+    p.builder.emb_out_split = [0, -1, 1]
+    p.builder.blm_split = [0, -1, 1]
+    p.builder.logits_split = [0, -1, 1]
     return p
 
 

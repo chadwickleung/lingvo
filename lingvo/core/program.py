@@ -714,13 +714,8 @@ class TrainProgram(BaseProgram):
       tf.logging.info('Run Tpu_outs')
       tf.logging.info(self.tpu_outs)
       values, outfeeds = sess.run(self.tpu_outs)
-      # values, outfeeds = sess.run(self.tpu_outs, options=run_options, run_metadata=run_metadata)
-      # tl_tpu_outs = timeline.Timeline(run_metadata.step_stats)
-      # ctf_tpu_outs = tl_tpu_outs.generate_chrome_trace_format()
-      # with open('/tmp/lingvo/timeline_tpu_outs.json', 'w') as f:
-      #   f.write(ctf_tpu_outs)
-      tf.logging.info('Done running tpu_outs')
-      infeed_future.wait()
+      tf.logging.info('Done running TPU outs')
+      infeed_future.get()
 
     self._eval_metrics.PackMetricsValues(values)
     eval_metrics = self._eval_metrics.metrics
@@ -915,7 +910,7 @@ class EvalProgram(BaseProgram):
       infeed_future = self._infeed_pool.apply_async(
           self._InfeedLoop, args=(sess,))
       values = sess.run(self.tpu_outs)
-      infeed_future.wait()
+      infeed_future.get()
 
     status_strs = []
     self._eval_metrics.PackMetricsValues(values)
@@ -1325,7 +1320,7 @@ class DecodeProgram(BaseProgram):
                            dec_metrics, global_step, buffered_decode_out,
                            postprocess_futures)
     if not py_utils.IsEagerMode():
-      infeed_future.wait()
+      infeed_future.get()
 
     if threadpool:
 
@@ -1458,8 +1453,8 @@ class ExperimentalDecodeProgram(DecodeProgram):
     for _ in range(self._steps_per_loop):
       decode_out_dict = _FetchDecodeOut(self.tpu_outs, sess)
       self._task.PostProcessDecodeOut(decode_out_dict, dec_metrics)
-    decode_future.wait()
-    infeed_future.wait()
+    decode_future.get()
+    infeed_future.get()
     summaries = {k: v.Summary(k) for k, v in dec_metrics.items()}
     elapsed_secs = time.time() - start_time
     num_examples_metric = dec_metrics['num_samples_in_batch']
@@ -1651,8 +1646,8 @@ class MLPerfTrainDecodeProgram(BaseProgram):
     infeed_future = self._infeed_pool.apply_async(
         self._InfeedLoop, args=(sess,))
 
-    infeed_future.wait()
-    train_future.wait()
+    infeed_future.get()
+    train_future.get()
 
     if self._ml_perf_log:
       mlp_log.mlperf_print(
