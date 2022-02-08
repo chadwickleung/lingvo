@@ -122,7 +122,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             attention_combine_dims=True,
             moe_hidden_dim = self.MOE_HIDDEN_DIM if self.MOE else None,
             capacity_factor = 1 if self.MOE else None,
-            # second_expert_policy = 'sampling' if self.MOE else None,  # Uses 'all' if not specify
+            second_expert_policy = 'sampling' if self.MOE else None,  # Uses 'all' if not specify
             num_groups = 2 if self.MOE else None,  # Chadwick: Code was not using num_groups, they use num_devices == 1
             e_dim = self.NUM_DEVICES_PER_SPLIT if self.MOE else None,  # Chadwick: number of experts
             c_dim = expert_capacity if self.MOE else None), # Chadwick: Required us to set it to 0
@@ -207,10 +207,10 @@ class DenseLm8B2x2(DenseLmTemplate):
     p = super().Task()
     p.train.tpu_device_order_mode = 2  # DeviceOrderMode.MESH
     p.builder.model_dim_reshape_segments = self.DEVICE_MESH_SHAPE[1]  # = 8
-    p.builder.emb_w_split = [-1, 1]
-    p.builder.emb_out_split = [0, -1, 1]
-    p.builder.blm_split = [0, -1, 1]
-    p.builder.logits_split = [0, -1, 1]
+    # p.builder.emb_w_split = [-1, 1]
+    # p.builder.emb_out_split = [0, -1, 1]
+    # p.builder.blm_split = [0, -1, 1]
+    # p.builder.logits_split = [0, -1, 1]
     return p
 
 
