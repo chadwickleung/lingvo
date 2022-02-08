@@ -102,9 +102,9 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
         builder=gshard_builder.DenseBuilder.Params().Set(
             device_mesh_shape=self.DEVICE_MESH_SHAPE,
             device_mesh=self.DEVICE_MESH,
-            relative_attention_num_buckets=32,  # Was 32
+            relative_attention_num_buckets=8,  # Was 32
             relative_attention_type='bias',
-            relative_attention_max_distance=128,  # Was 128
+            relative_attention_max_distance=8,  # Was 128
             dtype=tf.float32,
             fprop_dtype=tf.bfloat16,
             atten_logit_cap=self.ATTEN_LOGIT_CAP,
