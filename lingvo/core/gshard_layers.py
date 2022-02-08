@@ -2129,7 +2129,8 @@ def Top2GatingOnLogits(inputs,
     tf.logging.info('legacy_mtf_behavior is True')
     denom = gate_1 + gate_2 + 1e-9
     gate_1 /= denom
-    # gate_2 /= denom
+    ################################################
+    gate_2 /= denom
 
   # We reshape the mask as [X*S, E], and compute cumulative sums of
   # assignment indicators for each expert index e \in 0..E-1 independently.
@@ -2148,8 +2149,7 @@ def Top2GatingOnLogits(inputs,
   # expert e as top_1 expert without taking capacity into account.
   assert importance.dtype == fprop_dtype
   ###########################################################################
-  # Chadwick: There was no not
-  if not legacy_mtf_behavior:
+  if legacy_mtf_behavior:
     density_denom = 1.0
   else:
     density_denom = tf.reduce_mean(importance, axis=(1))[:, tf.newaxis] + 1e-6
