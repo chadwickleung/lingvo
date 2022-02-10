@@ -1881,6 +1881,8 @@ def Top2GatingOnLogits(inputs,
       experts.
   """
   tf.logging.info('############################################################')
+  tf.logging.info('############################################################')
+  tf.logging.info(inputs.shape)
   tf.logging.info('Group dim, group size dim, expert dim')
   tf.logging.info(logits.shape)
 
