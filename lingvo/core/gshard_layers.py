@@ -1881,6 +1881,10 @@ def Top2GatingOnLogits(inputs,
       experts.
   """
   tf.logging.info('############################################################')
+  tf.logging.info('Group dim, group size dim, expert dim')
+  tf.logging.info(logits.shape)
+
+  tf.logging.info('############################################################')
   tf.logging.info('Top2GatingOnLogits')
   if mask_dtype is None:
     mask_dtype = fprop_dtype
