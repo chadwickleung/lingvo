@@ -125,7 +125,7 @@ class DenseLmTemplate(base_model_params.SingleTaskModelParams):
             # second_expert_threshold = 0.0 if self.MOE else 0.0,
             # second_expert_policy = 'random' if self.MOE else None,  # Uses 'all' if not specify
             num_groups = 8 if self.MOE else None,  # Chadwick: Code was not using num_groups, they use num_devices == 1
-            e_dim = 1 if self.MOE else None,  # Chadwick: number of experts
+            e_dim = 2 if self.MOE else None,  # Chadwick: number of experts
             c_dim = expert_capacity if self.MOE else None), # Chadwick: Required us to set it to 0
 
         batch_size=batch_size_per_tf_replica,
