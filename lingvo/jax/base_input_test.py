@@ -16,14 +16,15 @@
 """Tests for base_input."""
 
 import os
+
 from absl import flags
 from absl.testing import absltest
-from jax import test_util
 from lingvo.core import base_input_generator
 from lingvo.core import generic_input
 from lingvo.core import py_utils as tf_py_utils
 from lingvo.jax import base_input
 from lingvo.jax import py_utils
+from lingvo.jax import test_utils
 import numpy as np
 import tensorflow.compat.v2 as tf
 
@@ -109,7 +110,7 @@ class TestDatasetOverride(TestDataset):
     return batch
 
 
-class InputTest(test_util.JaxTestCase):
+class InputTest(test_utils.TestCase):
 
   def test_lingvo_input(self):
     tmp = os.path.join(FLAGS.test_tmpdir, 'tmptest')
@@ -154,6 +155,28 @@ class InputTest(test_util.JaxTestCase):
     inp2.reset()
     batch = inp2.get_next()
     self.assertArraysEqual(np.array([0, 1], dtype=np.int32), batch.num)
+
+  def test_lingvo_input_change_batch_size(self):
+    tmp = os.path.join(FLAGS.test_tmpdir, 'tmptest2')
+    batch_size = 2
+    num_batches = 6
+    num_data = batch_size * num_batches
+    with tf.io.TFRecordWriter(tmp) as w:
+      for i in range(num_data):
+        w.write(('%04d' % i).encode('utf-8'))
+
+    p = base_input.LingvoInputAdaptorNewBatchSize.Params()
+    p.input = LingvoInput.Params()
+    p.input.file_pattern = 'tfrecord:' + tmp
+    p.input.file_random_seed = 0
+    p.batch_size = 1
+    p.reset_for_eval = True
+    inp = p.Instantiate()
+    for i in range(num_batches * 2):
+      batch = inp.get_next()
+      self.assertArraysEqual(np.array([i], dtype=np.int32), batch.num)
+    with self.assertRaises(tf.errors.OutOfRangeError):
+      inp.get_next()
 
   def test_lingvo_tfdata_input(self):
     num_batches = 10
@@ -246,6 +269,26 @@ class InputTest(test_util.JaxTestCase):
       batch = test[i].get_next()
       self.assertEqual(batch.data[0, 0] % p.num_infeed_hosts, i)
 
+  def test_validate_batch_size(self):
+    tmp = os.path.join(FLAGS.test_tmpdir, 'tmptest3')
+    with tf.io.TFRecordWriter(tmp) as w:
+      for i in range(12):
+        w.write(('%04d' % i).encode('utf-8'))
+
+    p = base_input.LingvoInputAdaptorNewBatchSize.Params()
+    p.input = LingvoInput.Params().Set(
+        file_pattern='tfrecord:' + tmp, file_random_seed=0)
+    with self.assertRaisesRegex(ValueError, 'p.batch_size'):
+      p.Instantiate()
+
+    p2 = base_input.LingvoInputAdaptor.Params().Set(input=p.input)
+    p2.batch_size = 2
+    with self.assertRaisesRegex(ValueError, 'p.batch_size'):
+      p2.Instantiate()
+
+    p3 = TestInput.Params()
+    with self.assertRaisesRegex(ValueError, 'p.batch_size'):
+      p3.Instantiate()
 
 if __name__ == '__main__':
   absltest.main()

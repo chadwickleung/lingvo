@@ -220,6 +220,8 @@ class QuantizableLayer(base_layer.BaseLayer):
                       feature_axis,
                       domain='weight',
                       *,
+                      tensor_split_dims_mapping=None,
+                      device_mesh=None,
                       legacy_aqt_w_name=None):
     """Creates Quantized weights for later use.
 
@@ -231,6 +233,10 @@ class QuantizableLayer(base_layer.BaseLayer):
       shape: Shape of the weight.
       feature_axis: axis corresponding to output channel/feature for weights.
       domain: Custom domain to match (defaults to 'weight').
+      tensor_split_dims_mapping: A list of integers that map each tensor axis
+        to the device mesh axis along which it is sharded.
+      device_mesh: A numpy.ndarray describing the topology of a device mesh to
+        partition the created variable onto.
       legacy_aqt_w_name: Used for compatibility with old checkpoints.
     """
     qd = self._GetQDomain(domain)
@@ -246,6 +252,7 @@ class QuantizableLayer(base_layer.BaseLayer):
           with self._CreateChildContext(qdchild_name):
             with tf.variable_scope(qd.params.name):
               qd.CreateTensorWithShape(w_name, shape, feature_axis,
+                                       tensor_split_dims_mapping, device_mesh,
                                        legacy_aqt_w_name)
           break
 
@@ -556,18 +563,11 @@ class QuantizableLayer(base_layer.BaseLayer):
     def WrapOp(op_name, op, dist=None):
       """Adds a wrapper op to the layer's fns."""
 
-      def Wrapped(*op_args,
-                  qout_name=None,
-                  qmin=None,
-                  qmax=None,
-                  qdomain=None,
-                  **op_kwargs):
+      def Wrapped(*op_args, qout_name=None, qdomain=None, **op_kwargs):
         """Wraps a native op."""
-        if (qout_name is None and (qmin is None or qmax is None) and
-            dist is None):
+        if qout_name is None and dist is None:
           raise ValueError(
-              f'Quantized op "{op_name}" requires qout_name (QTensor name) or '
-              'qmin/qmax to be set.')
+              f'Quantized op "{op_name}" requires qout_name to be set.')
 
         # Provide a better default name if none provided.
         if 'name' not in op_kwargs and qout_name is not None:
@@ -579,10 +579,6 @@ class QuantizableLayer(base_layer.BaseLayer):
         # Handle the output.
         if qout_name is not None:
           y = self.QTensor(qout_name, y)
-        elif qmin is not None:
-          qd = self._GetQDomain(qdomain)
-          if qd:
-            y = qd.QuantizeNaturalRange(y, qmin, qmax)
         else:
           y = self.QRAct(y, dist, qdomain)
         return y
@@ -829,6 +825,8 @@ class QDomain(base_layer.BaseLayer):
                             t_name,
                             shape,
                             feature_axis,
+                            mesh_split=None,
+                            device_mesh=None,
                             legacy_aqt_t_name=None):
     """Creates a QTensor with t_name and given shape.
 
@@ -836,6 +834,10 @@ class QDomain(base_layer.BaseLayer):
       t_name: Unique name (within layer) for this tensor.
       shape: Expected shape of the tensor.
       feature_axis: axis corresponding to output channel/feature for weights.
+      mesh_split: A list of integers that map each tensor axis
+        to the device mesh axis along which it is sharded.
+      device_mesh: A numpy.ndarray describing the topology of a device mesh to
+        partition the created variable onto.
       legacy_aqt_t_name: Used for compatibility with old checkpoints.
     """
     pass

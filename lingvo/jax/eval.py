@@ -26,9 +26,9 @@ from absl import logging
 import jax
 from jax.experimental import maps
 from jax.experimental import mesh_utils
-import jax.numpy as jnp
 from lingvo.jax import base_input
 from lingvo.jax import base_layer
+from lingvo.jax import base_metrics
 from lingvo.jax import base_model_params
 from lingvo.jax import base_task
 from lingvo.jax import checkpoint_pb2
@@ -38,7 +38,6 @@ from lingvo.jax import pytypes
 from lingvo.jax import summary_utils
 from lingvo.jax import train_states
 from lingvo.jax import trainer_lib
-import numpy as np
 import tensorflow.compat.v2 as tf
 
 from lingvo.jax import checkpoints
@@ -52,6 +51,19 @@ JTensor = pytypes.JTensor
 NestedJTensor = pytypes.NestedJTensor
 TrainState = train_states.TrainState
 SummaryWriter = tf.summary.SummaryWriter
+
+
+def maybe_ema(model_states):
+  """Finds the ema state from optimizer states."""
+  if not model_states.opt_states:
+    return model_states
+  for i in range(len(model_states.opt_states[0])):
+    if 'ema' in model_states.opt_states[0][i]:
+      return TrainState(
+          step=model_states.step,
+          mdl_vars=model_states.opt_states[0][i].ema,
+          opt_states={})
+  return model_states
 
 
 def evaluate(
@@ -105,6 +117,8 @@ def evaluate_pmap_model(
   prng_key, init_key = jax.random.split(prng_key)
 
   checkpoint_dir = os.path.join(job_log_dir, 'checkpoints')
+  # Restore flax checkpoints still required bak variables in TrainState
+  # TODO(pax): add is_eval=True to initialize_model_state
   model_states = trainer_lib.initialize_model_state(jax_task, init_key)
   # Pmap does not use GDA, and so global_mesh and mesh_axes are None.
   model_states = checkpoints.restore_checkpoint(model_states, checkpoint_dir)
@@ -118,14 +132,15 @@ def evaluate_pmap_model(
   prng_key = jax.random.fold_in(prng_key, jax.process_index())
   logging.info('root prng_key: %s', prng_key)
 
-  def eval_step(mdl_vars, prng_key, global_step, inputs):
+  def eval_step(mdl_states, prng_key, inputs):
+    mdl_states = trainer_lib.train_state_for_eval_step(mdl_states)
     return trainer_lib.eval_step_single_learner(
         jax_task,
-        mdl_vars,
+        mdl_states,
         prng_key,
-        global_step,
         inputs,
-        data_parallel_axis_name='batch')
+        data_parallel_axis_name='batch',
+        fprop_dtype=jax_task.model.fprop_dtype)
 
   num_devices = jax.local_device_count()
   prng_key, eval_key = jax.random.split(prng_key)
@@ -154,9 +169,8 @@ def evaluate_pmap_model(
     while True:
       step_i = int(jax.device_get(replicated_model_states.step)[0])
       eval_step = functools.partial(p_eval_step,
-                                    replicated_model_states.mdl_vars,
-                                    eval_prng_seed,
-                                    replicated_model_states.step)
+                                    maybe_ema(replicated_model_states),
+                                    eval_prng_seed)
       # Run the eval loop.
       model_utils.run_eval_loop_over_test_splits(
           num_steps,
@@ -228,20 +242,44 @@ def evaluate_spmd_model(
   sample_model_inputs = eval_input_p[0].Instantiate().get_next()
   inputs_shape = tf.nest.map_structure(get_shape_dtype, sample_model_inputs)
 
+  jax_task = task_p.Instantiate()
   model_p = task_p.model
   mesh_shape = model_p.device_mesh.shape
   device_mesh = mesh_utils.create_device_mesh(mesh_shape)
   logging.info('device_mesh: %s', device_mesh)
   global_mesh = maps.Mesh(device_mesh, model_p.mesh_axis_names)
-  with maps.mesh(device_mesh, model_p.mesh_axis_names):
-    partitioned_train_state, partitioned_specs, eval_inputs_partition_specs, _, eval_step, _ = (
-        trainer_lib.partition_spmd_model(task_p, init_key, inputs_shape))
-    partitioned_train_state = checkpoints.restore_checkpoint(
-        partitioned_train_state,
-        checkpoint_task_dir,
-        global_mesh=global_mesh,
-        checkpoint_type=checkpoint_type,
-        state_specs=partitioned_specs)
+  use_gda_checkpoint = jax.config.jax_parallel_functions_output_gda
+  with global_mesh:
+    jax_task.model.instantiate_variable_configs()
+    # Restore flax checkpoints still required backward variables in TrainState
+    # TODO(pax): set is_eval=True for all ckpt types.
+    if use_gda_checkpoint:
+      partitioned_specs = jax_task.create_train_state_partition_specs(
+          jax_task.model.vars, is_eval=True)
+      partitioned_train_state = checkpoints.restore_checkpoint(
+          None,
+          checkpoint_task_dir,
+          global_mesh=global_mesh,
+          checkpoint_type=checkpoint_type,
+          state_specs=partitioned_specs)
+      eval_step, inputs_partition_specs = (
+          trainer_lib.get_partitioned_spmd_model_step_fn(
+              jax_task,
+              init_key,
+              partitioned_specs,
+              inputs_shape,
+              is_eval=True))
+    else:
+      (partitioned_train_state, partitioned_specs, inputs_partition_specs, _,
+       eval_step, _) = trainer_lib.partition_spmd_model(task_p, init_key,
+                                                        inputs_shape)
+      partitioned_train_state = checkpoints.restore_checkpoint(
+          partitioned_train_state,
+          checkpoint_task_dir,
+          global_mesh=global_mesh,
+          checkpoint_type=checkpoint_type,
+          state_specs=partitioned_specs)
+
     logging.info('partitioned_train_state: %s',
                  jax.tree_map(lambda x: x.shape, partitioned_train_state))
     if multi_host_checkpointing:
@@ -270,9 +308,10 @@ def evaluate_spmd_model(
       ]
       while True:
         step_i = int(jax.device_get(partitioned_train_state.step))
-        eval_step_fn = functools.partial(eval_step,
-                                         partitioned_train_state.mdl_vars,
-                                         eval_key, partitioned_train_state.step)
+        eval_step_fn = functools.partial(
+            eval_step,
+            trainer_lib.train_state_for_eval_step(partitioned_train_state),
+            eval_key)
         # Run the eval loop.
         model_utils.run_eval_loop_over_test_splits(
             num_steps,
@@ -280,7 +319,7 @@ def evaluate_spmd_model(
             eval_summary_writers,
             step_i,
             eval_input_pipelines,
-            eval_inputs_partition_specs,
+            inputs_partition_specs,
             inputs_shape,
             global_mesh,
             reshard_inputs=False)
@@ -299,7 +338,7 @@ def evaluate_spmd_model(
         # There must be a new checkpoint here.
         logging.info('Found new checkpoint: %s', new_checkpoint)
         partitioned_train_state = checkpoints.restore_checkpoint(
-            partitioned_train_state,
+            None if use_gda_checkpoint else partitioned_train_state,
             checkpoint_task_dir,
             global_mesh=global_mesh,
             checkpoint_type=checkpoint_type,
@@ -445,6 +484,8 @@ def decode_pmap_model(
     ]
 
     jax_task = task_p.Instantiate()
+    # Restore flax checkpoints still required bak variables in TrainState
+    # TODO(pax): add is_eval=True to initialize_model_state
     model_states = trainer_lib.initialize_model_state(jax_task, init_key)
     model_states = checkpoints.restore_checkpoint(
         model_states, restore_checkpoint_dir, step=restore_checkpoint_step)
@@ -477,17 +518,6 @@ def decode_pmap_model(
       last_checkpoint = new_checkpoint
 
 
-def _aggregate_metrics(metrics_dict, pmap_axis_name):
-  """Aggregate a dict of metrics over all replicas."""
-  mean_metrics = type(metrics_dict)()
-  for k, v in metrics_dict.items():
-    value, weight = v
-    sum_value = jax.lax.psum(value * weight, axis_name=pmap_axis_name)
-    sum_weight = jax.lax.psum(weight, axis_name=pmap_axis_name)
-    mean_metrics[k] = (sum_value / (sum_weight + 1e-8), sum_weight)
-  return mean_metrics
-
-
 def _decode_once_pmap_model(
     jax_task: base_task.SingleTask,
     task_p: InstantiableParams,
@@ -512,19 +542,21 @@ def _decode_once_pmap_model(
   """
   model = jax_task.model
   model_p = task_p.model
+  metrics_p = task_p.metrics
+  if not metrics_p:
+    metrics_p = base_metrics.MeanMetrics.Params()
+  decode_metrics = metrics_p.Instantiate()
+  process_decode_metrics = metrics_p.Instantiate()
+
   step_i = _get_step(replicated_model_states.step)
   pmap_axis_name = 'batch'
-  aggregate_metrics = functools.partial(
-      _aggregate_metrics, pmap_axis_name=pmap_axis_name)
-  pmap_aggregate_metrics = jax.pmap(
-      aggregate_metrics, axis_name=pmap_axis_name, out_axes=None)
 
-  def decode_step(mdl_vars, prng_key, global_step, inputs):
-    metrics, out = trainer_lib.decode_step(model, mdl_vars, prng_key,
-                                           global_step, inputs,
+  def decode_step(mdl_states, prng_key, inputs):
+    mdl_states = trainer_lib.train_state_for_eval_step(mdl_states)
+    metrics, out = trainer_lib.decode_step(model, mdl_states, prng_key, inputs,
                                            model_p.fprop_dtype)
-    mean_metrics = aggregate_metrics(metrics)
-    return mean_metrics, out
+    metrics = decode_metrics.aggregate(metrics)
+    return metrics, out
 
   # As an example, suppose the output leaf from trainer_lib.decoder_step()
   # for each core has shape: [per_core_batch_size, decoding_length].
@@ -546,8 +578,8 @@ def _decode_once_pmap_model(
   pmap_decode_step = jax.pmap(
       decode_step, axis_name=pmap_axis_name, out_axes=(None, 0))
   decode_step_func = functools.partial(pmap_decode_step,
-                                       replicated_model_states.mdl_vars,
-                                       prng_seed, replicated_model_states.step)
+                                       maybe_ema(replicated_model_states),
+                                       prng_seed)
 
   num_steps = [
       -1 if p.reset_for_eval else p.eval_loop_num_batches for p in input_p
@@ -556,7 +588,6 @@ def _decode_once_pmap_model(
   for split, num_split_steps in enumerate(num_steps):
     logging.info('Start decoding on input %s', input_p[split].name)
     step_num = 0
-    metrics = {}
     while num_split_steps < 0 or step_num < num_split_steps:
       step_num += 1
       try:
@@ -566,51 +597,22 @@ def _decode_once_pmap_model(
         break
       batch = tf.nest.map_structure(py_utils.reshard, batch)
       batch_metrics, out = decode_step_func(batch)
+      # we store the metric directly as it has already been aggregated in
+      # side decode_step_fun
+      decode_metrics.store(batch_metrics)
       logging.info('Finished decoding input batch %d', step_num)
+
       out = tf.nest.map_structure(py_utils.unshard, out)
       process_metrics, processed = model.process_decode_out(inputs[split], out)
       decodes[split].extend(processed)
       logging.info('Finished processing decoded input batch %d', step_num)
 
       # Reshard the metrics for pmap.
-      reshard_process_metrics = type(process_metrics)()
-      for k, v in process_metrics.items():
-        value, weight = v
-        new_value = jnp.ones(
-            shape=(jax.local_device_count(),), dtype=value.dtype) * value
-        new_weight = jnp.ones(
-            shape=(jax.local_device_count(),),
-            dtype=weight.dtype) * weight / jax.local_device_count()
-        reshard_process_metrics[k] = (new_value, new_weight)
-      process_metrics = pmap_aggregate_metrics(reshard_process_metrics)
-      batch_metrics.update(process_metrics)
-      batch_metrics = py_utils.maybe_unreplicate_gda(batch_metrics)
-      for k in batch_metrics:
-        if k in metrics:
-          metrics[k] += [batch_metrics[k]]
-        else:
-          metrics[k] = [batch_metrics[k]]
-
-    for k in metrics:
-      metric_values = np.stack([metric[0] for metric in metrics[k]])
-      metric_weights = np.stack([metric[1] for metric in metrics[k]])
-      sum_metric_weights = np.sum(
-          np.stack([metric[1] for metric in metrics[k]]))
-      weighted_average = np.sum(
-          metric_values * metric_weights) / sum_metric_weights
-      metrics[k] = (weighted_average, sum_metric_weights)
+      process_decode_metrics.update(process_metrics)
 
     with summary_writers[split].as_default():
-      for key, value in metrics.items():
-        weighted_average, sum_metric_weights = value
-        logging.info('  %s=%f (weight=%f)', key, weighted_average.item(),
-                     sum_metric_weights.item())
-        summary_utils.write_summary_tensor(step_i, f'Metrics/{key}',
-                                           weighted_average.item(),
-                                           summary_utils.SummaryType.SCALAR)
-        summary_utils.write_summary_tensor(step_i, f'Metrics/{key}-weight',
-                                           sum_metric_weights.item(),
-                                           summary_utils.SummaryType.SCALAR)
+      decode_metrics.summarize(step_i, 'decode_metrics')
+      process_decode_metrics.summarize(step_i, 'process_decode_metrics')
 
   basedir = os.path.join(job_log_dir, 'decoder_out')
   dirnames = _get_dir_names(input_p)
@@ -683,13 +685,16 @@ def decode_once_spmd_model(
   logging.info('device_mesh: %s', device_mesh)
   jax_task = task_p.Instantiate()
   global_mesh = maps.Mesh(device_mesh, model_p.mesh_axis_names)
-  with maps.mesh(device_mesh, model_p.mesh_axis_names):
-    (partitioned_train_state, inputs_partition_spec, partitioned_specs,
-     decode_step_fn) = trainer_lib.partition_spmd_model_decode(
-         task_p, init_key, inputs_shape)
+  with global_mesh:
     if restore_checkpoint_dir:
+      model = jax_task.model
+      model.instantiate_variable_configs()
+      # Get the metadata from variables instead of actually instantiating them.
+      partitioned_specs = jax_task.create_train_state_partition_specs(
+          model.vars, is_eval=True)
+      # Instantiate the TrainState directly from the checkpoint.
       partitioned_train_state = checkpoints.restore_checkpoint(
-          partitioned_train_state,
+          None,
           restore_checkpoint_dir,
           global_mesh=global_mesh,
           checkpoint_type=checkpoint_type,
@@ -698,19 +703,26 @@ def decode_once_spmd_model(
       if multi_host_checkpointing:
         py_utils.sync_global_devices(
             f'checkpointer:restored:{restore_checkpoint_parent_dir}')
+      decode_step_fn, inputs_partition_spec = (
+          trainer_lib.get_partitioned_spmd_model_decode_fn(
+              jax_task, init_key, partitioned_specs, inputs_shape))
+    else:
+      # When restore is not specified, randomly initiate the train_state.
+      (partitioned_train_state, inputs_partition_spec, partitioned_specs,
+       decode_step_fn) = trainer_lib.partition_spmd_model_decode(
+           task_p, init_key, inputs_shape)
     logging.info('partitioned_train_state: %s',
                  jax.tree_map(lambda x: x.shape, partitioned_train_state))
-
     # We do not fold in jax.process_index in contrast to the pmap version and
     # use a single global key instead to rely on pjit to split for different
     # replicas.
     logging.info('root prng_key: %s', prng_key)
     prng_key, decode_key = jax.random.split(prng_key)
     logging.info('eval prng_key: %s', decode_key)
-    spmd_decode_step_fn = functools.partial(decode_step_fn,
-                                            partitioned_train_state.mdl_vars,
-                                            decode_key,
-                                            partitioned_train_state.step)
+    spmd_decode_step_fn = functools.partial(
+        decode_step_fn,
+        trainer_lib.train_state_for_eval_step(partitioned_train_state),
+        decode_key)
 
     num_steps = [
         -1 if p.reset_for_eval else p.eval_loop_num_batches for p in input_p
@@ -735,10 +747,11 @@ def decode_once_spmd_model(
         # Output is fully replicated now, so it's ok to unreplicate it by
         # retrieving from device 0 only.
         out = py_utils.maybe_unreplicate_gda(out)
-        logging.info('Finished decoding input batch %d', step_num)
+        global_batch_size = next(iter(out.values())).shape[0]
+        logging.info('Finished decoding input batch %d with %d examples',
+                     step_num, global_batch_size)
         # Manually shard the output per each jax process.
         # We require that all fields in the output is batch major.
-        global_batch_size = next(iter(out.values())).shape[0]
         if global_batch_size % jax.process_count() != 0:
           raise ValueError(f'Global batch size {global_batch_size} must divide '
                            f'jax process count {jax.process_count()}')

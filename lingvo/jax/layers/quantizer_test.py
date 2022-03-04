@@ -16,16 +16,16 @@
 """Tests for quantizer."""
 
 from absl.testing import absltest
+from absl.testing import parameterized
 
 import jax
-from jax import test_util
 import jax.numpy as jnp
+from lingvo.jax import test_utils
 from lingvo.jax.layers import quantizer
 import numpy as np
 
 
-@test_util.with_config(jax_numpy_rank_promotion='allow')
-class SeqVectorQuantizerTest(test_util.JaxTestCase):
+class SeqVectorQuantizerTest(test_utils.TestCase):
 
   w = np.array([[0.116230249, 0.0104732513, -0.409445882, -0.153374314],
                 [-0.0672334433, -0.430877686, -0.280010223, 0.394074917],
@@ -35,7 +35,8 @@ class SeqVectorQuantizerTest(test_util.JaxTestCase):
   def _GetParams(self, num_classes, latent_dim):
     return quantizer.SeqVectorQuantizer.Params().Set(
         name='vq',
-        normalize=True,
+        normalize_latent_vector=True,
+        normalize_codebook=True,
         num_latent_classes=num_classes,
         latent_dim=latent_dim,
         beta=0.1)
@@ -53,7 +54,7 @@ class SeqVectorQuantizerTest(test_util.JaxTestCase):
     vq = vq_p.Instantiate()
     vq_theta = vq.instantiate_variables(jax.random.PRNGKey(1))
     vq_theta.w = jnp.expand_dims(self.w, 1)
-    out = vq.fprop(vq_theta, z, paddings)
+    out = test_utils.apply(vq, vq_theta, vq.fprop, z, paddings)
 
     with self.subTest('test_shape'):
       self.assertEqual((b, t, latent_dim), out.z_q.shape)
@@ -84,13 +85,36 @@ class SeqVectorQuantizerTest(test_util.JaxTestCase):
     vq_p.Set(num_groups=num_groups)
     vq = vq_p.Instantiate()
     vq_theta = vq.instantiate_variables(jax.random.PRNGKey(1))
-    out = vq.fprop(vq_theta, z, paddings)
+    out = test_utils.apply(vq, vq_theta, vq.fprop, z, paddings)
 
     with self.subTest('test_shape'):
       self.assertEqual((b, t, latent_dim), out.z_q.shape)
       self.assertEqual((b, t, num_groups), out.z_codes.shape)
       self.assertEqual((b, t, num_groups, num_classes), out.z_onehot.shape)
 
+
+class RandomVectorQuantizerTest(test_utils.TestCase):
+
+  @parameterized.parameters(
+      (2, 4, 20, 16, 4),
+      (3, 7, 16, 16, 20),
+  )
+  def testBase(self, b, t, latent_dim, projection_dim, num_classes):
+    np.random.seed(2022)
+    z = np.random.rand(b, t, latent_dim).astype(np.float32)
+    paddings = np.zeros((b, t)).astype(np.float32)
+
+    rq = quantizer.RandomVectorQuantizer.Params().Set(
+        name='vq',
+        num_latent_classes=num_classes,
+        latent_dim=latent_dim,
+        projection_dim=projection_dim)
+    rq = rq.Instantiate()
+    rq_theta = rq.instantiate_variables(jax.random.PRNGKey(1))
+    out = test_utils.apply(rq, rq_theta, rq.fprop, z, paddings)
+    self.assertEqual((b, t, projection_dim), out.z_q.shape)
+    self.assertEqual((b, t), out.z_codes.shape)
+    self.assertEqual((b, t, num_classes), out.z_onehot.shape)
 
 if __name__ == '__main__':
   absltest.main()

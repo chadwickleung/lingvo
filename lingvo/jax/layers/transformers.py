@@ -18,7 +18,6 @@
 from typing import Any, Optional, Tuple, Union
 
 from absl import logging
-import jax
 from jax import numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 from lingvo.jax import base_layer
@@ -27,7 +26,6 @@ from lingvo.jax import py_utils
 from lingvo.jax import pytypes
 from lingvo.jax.layers import activations as activations_lib
 from lingvo.jax.layers import attentions
-from lingvo.jax.layers import embedding_softmax
 from lingvo.jax.layers import linears
 from lingvo.jax.layers import normalizations
 from lingvo.jax.layers import pipeline
@@ -36,16 +34,12 @@ from lingvo.jax.layers import repeats
 from lingvo.jax.layers import stats
 from lingvo.jax.layers import stochastics
 import numpy as np
-import tensorflow.compat.v2 as tf
-
-CreateLayerVariableStatus = base_layer.CreateLayerVariableStatus
 
 NestedMap = py_utils.NestedMap
 WeightInit = py_utils.WeightInit
 weight_params = py_utils.weight_params
 
 InstantiableParams = py_utils.InstantiableParams
-AuxLossContext = py_utils.AuxLossContext
 JTensor = pytypes.JTensor
 
 
@@ -219,10 +213,13 @@ class TransformerFeedForward(base_layer.BaseLayer):
         'residual_dropout_tpl', stochastics.Dropout.Params(),
         'Residual dropout params template. keep_prop will be reset to '
         '(1.0 - residual_dropout_prob).')
+
     p.Define('add_skip_connection', True, 'Whether to add residual connection')
     p.Define(
         'residual_weight', 1.0, 'Weight of the residual connection. '
         'Output = fn(x) * residual_weight + x.')
+    p.Define('residual_droppath_prob', 0.0,
+             'Probability at which we drop the entire residual path.')
     p.Define(
         'norm_policy', 'pre',
         'Policy for applying normaliztion wrt. transformations. '
@@ -345,8 +342,14 @@ class TransformerFeedForward(base_layer.BaseLayer):
     residual_dropout_p.keep_prob = 1.0 - p.residual_dropout_prob
     self.create_child('residual_dropout', residual_dropout_p)
 
+    if p.residual_droppath_prob > 0:
+      assert p.add_skip_connection
+      droppath_p = stochastics.StochasticResidual.Params().Set(
+          name='residual_droppath',
+          survival_prob=1.0 - p.residual_droppath_prob)
+      self.create_child('residual_droppath', droppath_p)
+
   def fprop(self,
-            theta: NestedMap,
             inputs: JTensor,
             paddings: Optional[JTensor] = None) -> JTensor:
     p = self.params
@@ -358,24 +361,20 @@ class TransformerFeedForward(base_layer.BaseLayer):
       inputs *= (1.0 - paddings)
 
     if p.norm_policy == 'primer_hybrid':
-      inputs_normalized = self.pre_layer_norm.fprop(theta.pre_layer_norm,
-                                                    inputs)
+      inputs_normalized = self.pre_layer_norm.fprop(inputs)
     elif p.norm_policy == 'pre':
-      inputs_normalized = self.layer_norm.fprop(theta.layer_norm, inputs)
+      inputs_normalized = self.layer_norm.fprop(inputs)
     else:
       inputs_normalized = inputs
 
     # Apply first FFN layer
     if self._is_ffn1_gated:
       # theta.ffn_layer1_gate corresponds to gshard_builder's wi0
-      gate_value = self.ffn_layer1_gate.fprop(theta.ffn_layer1_gate,
-                                              inputs_normalized)
+      gate_value = self.ffn_layer1_gate.fprop(inputs_normalized)
       # theta.ffn_layer1 corresponds to gshard_builder's wi1
-      projected_inputs = gate_value * self.ffn_layer1.fprop(
-          theta.ffn_layer1, inputs_normalized)
+      projected_inputs = gate_value * self.ffn_layer1.fprop(inputs_normalized)
     else:
-      projected_inputs = self.ffn_layer1.fprop(theta.ffn_layer1,
-                                               inputs_normalized)
+      projected_inputs = self.ffn_layer1.fprop(inputs_normalized)
       projected_inputs = checkpoint_name(projected_inputs, 'ffn1')
 
     # Apply paddings if not None
@@ -383,11 +382,10 @@ class TransformerFeedForward(base_layer.BaseLayer):
       projected_inputs *= (1.0 - paddings)
 
     # Apply RELU dropout
-    projected_inputs = self.relu_dropout.fprop(theta.relu_dropout,
-                                               projected_inputs)
+    projected_inputs = self.relu_dropout.fprop(projected_inputs)
 
     # Apply second FFN layer
-    projected_inputs = self.ffn_layer2.fprop(theta.ffn_layer2, projected_inputs)
+    projected_inputs = self.ffn_layer2.fprop(projected_inputs)
     projected_inputs = checkpoint_name(projected_inputs, 'ffn2')
 
     # Apply paddings if not None
@@ -396,20 +394,21 @@ class TransformerFeedForward(base_layer.BaseLayer):
 
     # Apply Primer normalization before dropout.
     if p.norm_policy == 'primer_hybrid':
-      projected_inputs = self.post_layer_norm.fprop(theta.post_layer_norm,
-                                                    projected_inputs)
+      projected_inputs = self.post_layer_norm.fprop(projected_inputs)
 
     # Apply residual dropout
-    projected_inputs = self.residual_dropout.fprop(theta.residual_dropout,
-                                                   projected_inputs)
+    projected_inputs = self.residual_dropout.fprop(projected_inputs)
 
     if hasattr(self, 'res_proj'):
-      inputs = self.res_proj_norm.fprop(
-          theta.res_proj_norm, self.res_proj.fprop(theta.res_proj, inputs))
+      inputs = self.res_proj_norm.fprop(self.res_proj.fprop(inputs))
 
     # Apply skip connection
     if p.add_skip_connection:
-      projected_inputs = projected_inputs * p.residual_weight + inputs
+      if p.residual_droppath_prob:
+        projected_inputs = self.residual_droppath.fprop(inputs,
+                                                        projected_inputs)
+      else:
+        projected_inputs = inputs + projected_inputs * p.residual_weight
 
     return projected_inputs
 
@@ -644,52 +643,49 @@ class TransformerFeedForwardMoe(base_layer.BaseLayer):
     for ii in range(p.expert_weight_shards):
       self.create_variable('wo_%d' % ii, wo_pc)
 
-  # TODO(zhangqiaorjc): Allow paddings to be optional?
-  def fprop(self, theta: NestedMap, inputs: JTensor,
-            paddings: JTensor) -> JTensor:
+  def fprop(self, inputs: JTensor, paddings: JTensor = None) -> JTensor:
     """Layer-norm, route, feed-forward, combine, residual.
 
     Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
       inputs: [batch, seq_len, model].
-      paddings: [batch, seq_len].
+      paddings: [batch, seq_len], optional when called by extend_step.
 
     Returns:
       Tensor of the same shape as inputs.
     """
     p = self.params
+    theta = self.local_theta()
     # Assume output_dims == input_dims
     output_dims = p.input_dims
+    fprop_dtype = self.fprop_dtype
 
     # Consistent with gshard implementation.
-    if p.apply_padding_first:
+    if p.apply_padding_first and paddings is not None:
       inputs *= (1.0 - jnp.expand_dims(paddings, axis=-1))
 
     # TODO(zhangqiaorjc): Handle input of shape [batch, seq_len, g, model/g]?
     if p.norm_policy == 'primer_hybrid':
-      inputs_normalized = self.pre_layer_norm.fprop(theta.pre_layer_norm,
-                                                    inputs)
+      inputs_normalized = self.pre_layer_norm.fprop(inputs)
     elif p.norm_policy == 'pre':
-      inputs_normalized = self.layer_norm.fprop(theta.layer_norm, inputs)
+      inputs_normalized = self.layer_norm.fprop(inputs)
     else:
       inputs_normalized = inputs
 
-    assert len(inputs_normalized.shape) == 3
-    bs, s_len, m_dim = inputs_normalized.shape
-    assert len(paddings.shape) == 2
-    assert paddings.shape == (bs, s_len)
+    assert len(inputs_normalized.shape) in [2, 3]
+    token_shape = inputs_normalized.shape[:-1]
+    num_tokens = np.prod(token_shape)
+    m_dim = inputs_normalized.shape[-1]
+    if paddings is not None:
+      assert paddings.shape == token_shape
 
     num_groups = p.num_groups
     assert num_groups
     if (p.min_group_size is not None and
-        bs * s_len / num_groups < p.min_group_size):
-      num_groups = (bs * s_len + p.min_group_size - 1) // p.min_group_size
+        num_tokens / num_groups < p.min_group_size):
+      num_groups = (num_tokens + p.min_group_size - 1) // p.min_group_size
       logging.info('num_groups adjusted to %s.', num_groups)
-    assert (bs * s_len) % num_groups == 0
-    g_len = (bs * s_len) // num_groups
-    reshaped_inputs = inputs_normalized.reshape([num_groups, g_len, m_dim])
-    reshaped_paddings = paddings.reshape([num_groups, g_len])
+    assert num_tokens % num_groups == 0
+    g_len = num_tokens // num_groups
 
     # Sharding annotation.
     ap = p.activation_split_dims_mapping
@@ -697,10 +693,15 @@ class TransformerFeedForwardMoe(base_layer.BaseLayer):
     def split(t_in, sharding):
       return base_layer.maybe_shard(t_in, sharding, p.mesh_axis_names)
 
+    reshaped_inputs = inputs_normalized.reshape([num_groups, g_len, m_dim])
     reshaped_inputs = split(reshaped_inputs, ap.gsm)
-    reshaped_paddings = split(reshaped_paddings, ap.gs)
+    if paddings is not None:
+      reshaped_paddings = paddings.reshape([num_groups, g_len])
+      reshaped_paddings = split(reshaped_paddings, ap.gs)
+      reshaped_paddings = reshaped_paddings.astype(fprop_dtype)
+    else:
+      reshaped_paddings = None
 
-    fprop_dtype = py_utils.fprop_dtype(p)
     logits = jnp.einsum('gsm,me->gse', reshaped_inputs, theta.gate)
 
     # Here and below, we assume num devices equals num groups.
@@ -712,7 +713,7 @@ class TransformerFeedForwardMoe(base_layer.BaseLayer):
     # TODO(lepikhin): Validate stability. mask_dtype=np.int32 and
     # logits.astype(np.float32) should generally be sufficient.
     gating = gshard_utils.top2_gating_on_logits(
-        paddings=reshaped_paddings.astype(fprop_dtype),
+        paddings=reshaped_paddings,
         logits=logits.astype(jnp.float32),
         experts_dim=p.num_experts,
         expert_capacity_dim=p.expert_capacity_dim,
@@ -773,9 +774,9 @@ class TransformerFeedForwardMoe(base_layer.BaseLayer):
     hidden = split(hidden, ap.egch)
 
     # Activation function.
-    hidden = self.activation.fprop(theta.activation, hidden)
+    hidden = self.activation.fprop(hidden)
     # Dropout.
-    hidden = self.relu_dropout.fprop(theta.relu_dropout, hidden)
+    hidden = self.relu_dropout.fprop(hidden)
     # Output.
     expert_output = jnp.einsum('egch,ehm->egcm', hidden, theta_wo)
     expert_output = split(expert_output, ap.egcm)
@@ -786,20 +787,19 @@ class TransformerFeedForwardMoe(base_layer.BaseLayer):
                                  combine_tensor)
     combined_output = split(combined_output, ap.gsm)
 
-    combined_output = combined_output.reshape((bs, s_len, output_dims))
+    combined_output = combined_output.reshape(token_shape + (output_dims,))
     # Apply padding.
-    combined_output *= (1.0 - jnp.expand_dims(paddings, -1)).astype(fprop_dtype)
+    if paddings is not None:
+      combined_output *= (1.0 -
+                          jnp.expand_dims(paddings, -1)).astype(fprop_dtype)
     # Primer normalization before dropout.
     if p.norm_policy == 'primer_hybrid':
-      combined_output = self.post_layer_norm.fprop(theta.post_layer_norm,
-                                                   combined_output)
+      combined_output = self.post_layer_norm.fprop(combined_output)
     # Residual dropout.
-    after_residual = self.residual_dropout.fprop(theta.residual_dropout,
-                                                 combined_output)
+    after_residual = self.residual_dropout.fprop(combined_output)
     if p.add_skip_connection:
       if p.residual_droppath_prob:
-        out = self.residual_droppath.fprop(theta.residual_droppath, inputs,
-                                           after_residual)
+        out = self.residual_droppath.fprop(inputs, after_residual)
       else:
         out = inputs + after_residual * p.residual_weight
 
@@ -841,6 +841,8 @@ class Transformer(base_layer.BaseLayer):
         'such that, residual(x, y) = (x + dropout(y)).')
     p.Define('relu_dropout_prob', 0.0,
              'Probability at which we apply dropout to the FFN layers.')
+    p.Define('residual_droppath_prob', 0.0,
+             'Probability at which we drop the entire residual path.')
     p.Define('mask_self_attention', False, 'If True, use causal mask.')
     p.Define('cross_attention', False, 'If True, perform cross'
              'encoder-decoder attention.')
@@ -924,6 +926,13 @@ class Transformer(base_layer.BaseLayer):
                          'cross attention.')
       self.create_child('cross_attention', params)
 
+    # Initialize residual droppath
+    if p.residual_droppath_prob > 0:
+      droppath_p = stochastics.StochasticResidual.Params().Set(
+          name='residual_droppath',
+          survival_prob=1.0 - p.residual_droppath_prob)
+      self.create_child('residual_droppath', droppath_p)
+
     # Initialize feed-forward layer
     if p.tr_fflayer_tpl:
       params = p.tr_fflayer_tpl.Copy()
@@ -932,28 +941,25 @@ class Transformer(base_layer.BaseLayer):
       params.hidden_dims = p.hidden_dims
       params.relu_dropout_prob = p.relu_dropout_prob
       params.residual_dropout_prob = p.residual_dropout_prob
+      params.residual_droppath_prob = p.residual_droppath_prob
       params.norm_policy = p.norm_policy
       self.create_child('ff_layer', params)
 
-  def init_states(self, theta: NestedMap, target_batch_size: int,
+  def init_states(self, target_batch_size: int,
                   target_max_length: int) -> NestedMap:
     """Initialize the cache for the Transformer layer.
 
     Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
       target_batch_size: Batch size for the target.
       target_max_length: The length to decode the target.
 
     Returns:
       Initialized cache for decoding.
     """
-    return self.self_attention.init_states(theta.self_attention,
-                                           target_batch_size, target_max_length)
+    return self.self_attention.init_states(target_batch_size, target_max_length)
 
   def fprop(
       self,
-      theta: NestedMap,
       inputs: JTensor,
       paddings: JTensor,
       attention_mask: JTensor,
@@ -964,8 +970,6 @@ class Transformer(base_layer.BaseLayer):
     """Transformer decoder layer.
 
     Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
       inputs: Input sequence JTensor of shape [B, T, H].
       paddings: Input paddings JTensor of shape [B, T] (only used in FFN layer).
       attention_mask: Self attention mask ready to add to the logits. It can be
@@ -994,16 +998,14 @@ class Transformer(base_layer.BaseLayer):
     base_layer.add_summary('xformer_input_abs_max', inputs_stats.max_v)
 
     if p.norm_policy == 'primer_hybrid':
-      inputs_normalized = self.pre_layer_norm.fprop(theta.pre_layer_norm,
-                                                    inputs)
+      inputs_normalized = self.pre_layer_norm.fprop(inputs)
     elif p.norm_policy == 'pre':
-      inputs_normalized = self.layer_norm.fprop(theta.layer_norm, inputs)
+      inputs_normalized = self.layer_norm.fprop(inputs)
     else:
       inputs_normalized = inputs
 
     # Compute self-attention, key/value vectors are the input itself
     atten_output, self_atten_probs = self.self_attention.fprop(
-        theta.self_attention,
         inputs_normalized,
         inputs_normalized,
         inputs_normalized,
@@ -1011,13 +1013,16 @@ class Transformer(base_layer.BaseLayer):
         query_segment_pos=segment_pos)
     atten_probs = NestedMap(self_atten=self_atten_probs)
     if p.norm_policy == 'primer_hybrid':
-      atten_output = self.post_layer_norm.fprop(theta.post_layer_norm,
-                                                atten_output)
+      atten_output = self.post_layer_norm.fprop(atten_output)
 
     # Residual dropout and connection
-    atten_output = self.residual_dropout.fprop(theta.residual_dropout,
-                                               atten_output)
-    atten_output += inputs
+    atten_output = self.residual_dropout.fprop(atten_output)
+
+    # Apply skip connection
+    if p.residual_droppath_prob > 0.0:
+      atten_output = self.residual_droppath.fprop(inputs, atten_output)
+    else:
+      atten_output += inputs
 
     # Apply cross attention if applicable
     if self.params.cross_attention:
@@ -1028,26 +1033,27 @@ class Transformer(base_layer.BaseLayer):
       assert p.norm_policy != 'primer_hybrid'
 
       cross_atten_output, cross_atten_probs = self.cross_attention.fprop(
-          theta.cross_attention,
-          self.cross_layer_norm.fprop(theta.cross_layer_norm, atten_output),
+          self.cross_layer_norm.fprop(atten_output),
           cross_inputs,
           cross_inputs,
           atten_mask=cross_attention_mask)
       atten_probs.cross_atten = cross_atten_probs
 
       # Residual dropout and connection
-      cross_atten_output = self.residual_dropout.fprop(theta.residual_dropout,
-                                                       cross_atten_output)
-      atten_output += cross_atten_output
+      cross_atten_output = self.residual_dropout.fprop(cross_atten_output)
+
+      if p.residual_droppath_prob > 0.0:
+        atten_output = self.residual_droppath.fprop(atten_output,
+                                                    cross_atten_output)
+      else:
+        atten_output += cross_atten_output
 
     # Apply FFN layer
-    output = self.ff_layer.fprop(
-        theta.ff_layer, atten_output, paddings=paddings)
+    output = self.ff_layer.fprop(atten_output, paddings=paddings)
     return output, atten_probs
 
   def extend_step(
       self,
-      theta: NestedMap,
       cached_states: NestedMap,
       inputs: JTensor,
       *,
@@ -1059,8 +1065,6 @@ class Transformer(base_layer.BaseLayer):
     """Transformer decoder layer, autoregressive cached decoding.
 
     Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
       cached_states: A `.NestedMap` object containing tensors which are the
         results of previous attentions, used for cached decoding. key   - [T, B,
         N, H]. value - [T, B, N, H].
@@ -1087,25 +1091,21 @@ class Transformer(base_layer.BaseLayer):
     p = self.params
     # Layer normalize input
     if p.norm_policy == 'primer_hybrid':
-      inputs_normalized = self.pre_layer_norm.fprop(theta.pre_layer_norm,
-                                                    inputs)
+      inputs_normalized = self.pre_layer_norm.fprop(inputs)
     elif p.norm_policy == 'pre':
-      inputs_normalized = self.layer_norm.fprop(theta.layer_norm, inputs)
+      inputs_normalized = self.layer_norm.fprop(inputs)
 
     # Self-attention layer.
     updated_states, atten_output = self.self_attention.extend_step(
-        theta.self_attention,
         cached_states,
         inputs_normalized,
         atten_mask=attention_mask,
         time_step=time_step)
     if p.norm_policy == 'primer_hybrid':
-      atten_output = self.post_layer_norm.fprop(theta.post_layer_norm,
-                                                atten_output)
+      atten_output = self.post_layer_norm.fprop(atten_output)
 
     # Residual dropout and connection
-    atten_output = self.residual_dropout.fprop(theta.residual_dropout,
-                                               atten_output)
+    atten_output = self.residual_dropout.fprop(atten_output)
     atten_output += inputs
 
     # Apply cross attention if applicable
@@ -1114,23 +1114,21 @@ class Transformer(base_layer.BaseLayer):
       assert cross_attention_mask is not None
 
       atten_output_normalized = self.cross_layer_norm.fprop(
-          theta.cross_layer_norm, jnp.expand_dims(atten_output, axis=1))
+          jnp.expand_dims(atten_output, axis=1))
       cross_atten_output, _ = self.cross_attention.fprop(
-          theta.cross_attention,
           atten_output_normalized,
           cross_inputs,
           cross_inputs,
           atten_mask=cross_attention_mask)
 
       # Residual dropout and connection
-      cross_atten_output = self.residual_dropout.fprop(theta.residual_dropout,
-                                                       cross_atten_output)
+      cross_atten_output = self.residual_dropout.fprop(cross_atten_output)
       # Squeeze sequence dim
       cross_atten_output = jnp.squeeze(cross_atten_output, axis=1)
       atten_output += cross_atten_output
 
     # Apply FFN layer
-    output = self.ff_layer.fprop(theta.ff_layer, atten_output)
+    output = self.ff_layer.fprop(atten_output)
     return updated_states, output
 
 
@@ -1156,7 +1154,8 @@ class StackedTransformer(base_layer.BaseLayer):
                  num_groups=1,
                  c_dim=None,
                  capacity_factor=0.0,
-                 e_dim=None):
+                 e_dim=None,
+                 combine_qkv=False):
     """Common setup for GLaM Transformer layers.
 
     This function setups a transformer block for both MoE and dense GLaM models.
@@ -1190,6 +1189,7 @@ class StackedTransformer(base_layer.BaseLayer):
         over the average number of examples per expert assuming routing is
         completely uniform.
       e_dim: Number of experts.
+      combine_qkv: if combined qkv projection layer is used.
 
     Returns:
       A Params object to set up a StackedTransformer.
@@ -1197,11 +1197,9 @@ class StackedTransformer(base_layer.BaseLayer):
 
     p = cls.Params()
     p.name = name
-    p.enable_while_loop = False
     p.packed_input = True
-    p.num_layers_per_block = 2 if moe else 1
-    p.num_blocks = 1
     p.moe_layers = [0] if moe else None
+    p.num_layers = 2 if moe else 1
     p.model_dims = model_dim
     p.hidden_dims = ff_dim
     p.num_heads = attention_num_heads
@@ -1225,6 +1223,10 @@ class StackedTransformer(base_layer.BaseLayer):
         relative_attention_num_buckets=relative_attention_num_buckets,
         relative_attention_max_distance=relative_attention_max_distance)
     tr_atten_tpl.output_proj_use_nhd_shape = True
+    if combine_qkv:
+      tr_atten_tpl.combine_qkv = True
+      tr_atten_tpl.combined_qkv_proj_tpl.use_bias = False
+      tr_atten_tpl.combined_qkv_proj_tpl.attention_combine_dims = True
     # Non-MoE ffn setup
     ff_tpl = p.transformer_layer_params_tpl.tr_fflayer_tpl
     assert ff_tpl.cls == TransformerFeedForward
@@ -1252,23 +1254,13 @@ class StackedTransformer(base_layer.BaseLayer):
     moe_p.moe_load_balance_loss_weight = moe_load_balance_loss_weight
     return p
 
-  @staticmethod
-  def DefineParams(p):
+  @classmethod
+  def Params(cls) -> InstantiableParams:
+    p = super().Params()
     p.Define('cross_attention', False,
              'If set, introduces cross encoder-decoder attention layer.')
     p.Define('mask_self_attention', False, 'Use masked self-attention.')
     p.Define('num_layers', 0, 'Num of layers in this stack.')
-    # TODO(lepikhin): consider adding explicit block scope for blocks of layers
-    # so checkpoint has
-    # transformer/block_{0...num_blocks-1}/layer_{0...num_layers_per_block-1}
-    # p.Define('block_scope', False, 'Explicit block scope.')
-    #
-    # You must specify:
-    #   p.num_layers or
-    #   p.num_blocks and p.num_layers_per_block,
-    # so that p.num_layers == p.num_blocks * p.num_layers_per_block.
-    p.Define('num_blocks', None, 'Number of blocks.')
-    p.Define('num_layers_per_block', None, 'Block size.')
     p.Define('model_dims', 0, 'Model dimension in Transformer layers.')
     p.Define('hidden_dims', 0,
              'The hidden layer dimension of FFN in Transformer layers.')
@@ -1278,6 +1270,8 @@ class StackedTransformer(base_layer.BaseLayer):
         'dim_per_head == hidden_dim // num_heads.')
     p.Define('dropout_prob', 0.0,
              'Apply dropout at this prob at various places.')
+    p.Define('residual_droppath_prob', 0.0,
+             'Probability at which we drop the entire residual path.')
     p.Define(
         'transformer_layer_params_tpl', Transformer.Params(),
         'A template of Transformer.params, can be a list of params '
@@ -1289,15 +1283,6 @@ class StackedTransformer(base_layer.BaseLayer):
         'fold_padding_with_segment_mask', False, 'If True then segment'
         'mask is supposed to include the padding mask as well, i.e.'
         'treating PADs as one sequence and non-PADs as another.')
-    p.Define(
-        'enable_while_loop', False,
-        'Whether or not to use a while loop to unroll the transformer layer'
-        ' stack. Potential benefits: 1) reduce xla compilation time. '
-        ' 2) improve hbm usage due to explicit rematerialization.')
-    p.Define(
-        'checkpoint_policy', recurrent.AutodiffCheckpointType.SAVE_NOTHING,
-        'How to checkpoint residuals for BProp: save nothing, dot only or '
-        'dot with no batch dimensions.')
     # MoE related params.
     p.Define('moe_layer_tpl', TransformerFeedForwardMoe.Params(),
              'Template configuration for the moe feedforward layer.')
@@ -1310,24 +1295,11 @@ class StackedTransformer(base_layer.BaseLayer):
     p.Define('moe_layers', [], 'List of MoE layer indices, e.g. [0, 2, 4].')
     return p
 
-  @classmethod
-  def Params(cls) -> InstantiableParams:
-    p = super().Params()
-    p = StackedTransformer.DefineParams(p)
-    return p
-
   def __init__(self, params: InstantiableParams) -> None:
     super().__init__(params)
     p = self.params
 
-    if p.num_blocks:
-      assert p.num_layers_per_block > 0
-      assert not p.num_layers
-      p.num_layers = p.num_blocks * p.num_layers_per_block
-    else:
-      assert p.num_layers > 0
-      p.num_blocks = p.num_layers
-      p.num_layers_per_block = 1
+    assert p.num_layers > 0
     assert p.model_dims > 0
     assert p.hidden_dims > 0
     assert p.num_heads > 0
@@ -1347,6 +1319,11 @@ class StackedTransformer(base_layer.BaseLayer):
       p_i.residual_dropout_prob = p.dropout_prob
       p_i.relu_dropout_prob = p.dropout_prob
       p_i.hidden_dims = p.hidden_dims
+
+      if p.residual_droppath_prob > 0.0:
+        p_i.residual_droppath_prob = (
+            p.residual_droppath_prob * i / max(1, p.num_layers))
+
       if p.moe_layers and i in p.moe_layers:
         assert p.num_experts > 0
         moe_p = p.moe_layer_tpl.Copy()
@@ -1359,13 +1336,10 @@ class StackedTransformer(base_layer.BaseLayer):
     layer_params = [_layer_params(i) for i in range(p.num_layers)]
     self.create_children('x_layers', layer_params)
 
-  def init_states(self, theta: NestedMap, *args: Any,
-                  **kwargs: Any) -> NestedMap:
+  def init_states(self, *args: Any, **kwargs: Any) -> NestedMap:
     """Initialize the cache for the StackedTransformer layer.
 
     Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
       *args: Other arguments.
       **kwargs: Other keyword arguments.
 
@@ -1373,12 +1347,10 @@ class StackedTransformer(base_layer.BaseLayer):
       Initialized cache for decoding.
     """
     return NestedMap(x_layers=[
-        layer.init_states(layer_theta, *args, **kwargs)
-        for layer, layer_theta in zip(self.x_layers, theta.x_layers)
+        layer.init_states(*args, **kwargs) for layer in self.x_layers
     ])
 
   def fprop(self,
-            theta: NestedMap,
             inputs: JTensor,
             paddings: JTensor,
             segment_mask: Optional[JTensor] = None,
@@ -1389,8 +1361,6 @@ class StackedTransformer(base_layer.BaseLayer):
     """Stacked Transformer layer.
 
     Args:
-      theta: A `NestedMap` object containing weights' values of this layer and
-        its children layers.
       inputs: Input sequence of shape [B, T, H].
       paddings: Input paddings of shape [B, T].
       segment_mask: Segment mask for packed input of shape [B, 1, T, T] ready to
@@ -1426,121 +1396,19 @@ class StackedTransformer(base_layer.BaseLayer):
         cross_segment_mask,
         fold_padding_with_segment_mask=p.fold_padding_with_segment_mask)
 
-    if p.enable_while_loop:
-
-      num_blocks = p.num_layers // p.num_layers_per_block
-
-      def _stack_vars(*args):
-        args = [x[jnp.newaxis, :] for x in args]
-        return jnp.vstack(args)
-
-      # We stack variables independently for each layer in the block, e.g.
-      # for each index i from 0 to num_layers_per_block - 1, in the
-      # trivial case num_layers_per_block=1 it's equivalent to
-      #
-      # stacked_vars = py_utils.NestedMap(layer_000=tf.nest.map_structure(
-      #     _stack_vars, *theta.x_layers))
-      #
-      stacked_vars = []
-      for i in range(p.num_layers_per_block):
-        x_layers_i = theta.x_layers[i::p.num_layers_per_block]
-        stacked_vars_i = tf.nest.map_structure(_stack_vars, *x_layers_i)
-        stacked_vars.append(stacked_vars_i)
-
-      def _key(i):
-        # NestedMap requires string keys
-        return 'layer_%03d' % i
-
-      stacked_vars = py_utils.NestedMap(
-          {_key(i): v for i, v in enumerate(stacked_vars)})
-      # aux_loss is a cumulative aux_loss, we need ys to have per-layer
-      # aux_loss increments
-      carry = py_utils.NestedMap(
-          x_in=x_out, aux_loss=jnp.asarray(0., dtype=self.fprop_dtype))
-
-      # TODO(lepikhin): generalize this function to be a more generic one
-      def _scan_fn(carry, block_vars):
-        # TODO(b/199950567): Sharding propagation does not seem to handle scan
-        # boundary well. We need to annotate all parameters from within the scan
-        # body even though we already pass them to pjit invocation outside the
-        # scan at the top level once. Consider removing after bug fix.
-        def annotate_var_sharding_constraint(x, weight_param):
-          partition_spec = base_layer.var_partition_specs(
-              weight_param,
-              device_mesh=p.device_mesh,
-              device_axis_names=p.mesh_axis_names)
-          return base_layer.with_sharding_constraint(x, partition_spec)
-
-        aux_loss = carry.aux_loss
-        with py_utils.AuxLossContext(reentrant=True) as al_ctx:
-          assert al_ctx is not None
-          x_out = carry.x_in
-          for i in range(p.num_layers_per_block):
-            layer_vars_i = block_vars[_key(i)]
-            if p.device_mesh is not None:
-              assert p.mesh_axis_names is not None
-              layer_vars_i = tf.nest.map_structure(
-                  annotate_var_sharding_constraint, layer_vars_i,
-                  self.x_layers[i].vars)
-            x_out, _ = self.x_layers[i].fprop(
-                layer_vars_i,
-                x_out,
-                paddings,
-                attention_mask,
-                cross_inputs,
-                cross_attention_mask,
-                segment_pos=segment_pos,
-            )
-          if al_ctx.aux_losses:
-            assert isinstance(al_ctx.aux_losses, list)
-            aux_loss_inc = sum(al_ctx.aux_losses).astype(self.fprop_dtype)
-            base_layer.add_summary('aux_loss_inc', aux_loss_inc)
-            aux_loss = aux_loss + aux_loss_inc
-
-        return py_utils.NestedMap(
-            x_in=x_out, aux_loss=aux_loss), py_utils.NestedMap()
-
-      carry_final, _, summaries = recurrent.scan(
-          carry,
-          stacked_vars,
-          _scan_fn,
-          root_layer=self,
-          checkpoint_policy=p.checkpoint_policy)
-
-      # Now unpack summaries to the out-context.
-      # Q(yonghui): Shall we move summary handling to be within recurrent.scan?
-      for summary_key, summary_value in summaries.items():
-        # unstack summary_value
-        logging.info((summary_key, summary_value))
-        assert summary_value.shape[0] == num_blocks
-        unstacked_values = jnp.split(summary_value, num_blocks)
-        # Q(yonghui): shall we keep the summaries packed instead?
-        for i, v in enumerate(unstacked_values):
-          # TODO(yonghui): Here we assume summaries are all scalar values.
-          base_layer.add_summary(f'{summary_key}/{i}', v)
-
-      x_out = carry_final.x_in
-      aux_loss_ctx = py_utils.AuxLossContext.Current()
-      # Scan can not have sideeffects so we have to capture side effect
-      # "aux_loss" in the moe layer and propagate it explicitly.
-      if aux_loss_ctx is not None:
-        aux_loss_ctx.AddLoss(carry_final.aux_loss)
-    else:
-      for i in range(p.num_layers):
-        x_in = x_out
-        x_out, _ = self.x_layers[i].fprop(
-            theta.x_layers[i],
-            x_in,
-            paddings,
-            attention_mask,
-            cross_inputs,
-            cross_attention_mask,
-            segment_pos=segment_pos)
+    for i in range(p.num_layers):
+      x_in = x_out
+      x_out, _ = self.x_layers[i].fprop(
+          x_in,
+          paddings,
+          attention_mask,
+          cross_inputs,
+          cross_attention_mask,
+          segment_pos=segment_pos)
     return x_out
 
   def extend_step(
       self,
-      theta: NestedMap,
       cached_states: NestedMap,
       inputs: JTensor,
       *,
@@ -1553,8 +1421,6 @@ class StackedTransformer(base_layer.BaseLayer):
     """Transformer stacked decoder layers, autoregressive cached decoding.
 
     Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
       cached_states: A `.NestedMap` object containing tensors which are the
         results of previous attentions, used for cached decoding.
         cached_states.x_layers is a list corresponding to self.x_layers with key
@@ -1599,10 +1465,8 @@ class StackedTransformer(base_layer.BaseLayer):
 
     updated_states = NestedMap(x_layers=[])
     decoder_input = inputs
-    for layer, layer_theta, layer_states in zip(self.x_layers, theta.x_layers,
-                                                cached_states.x_layers):
+    for layer, layer_states in zip(self.x_layers, cached_states.x_layers):
       updated_layer_states, decoder_output = layer.extend_step(
-          layer_theta,
           layer_states,
           decoder_input,
           time_step=time_step,
@@ -1649,7 +1513,6 @@ class StackedTransformerRepeated(base_layer.BaseLayer):
     self.create_child('repeat', repeat_l_params)
 
   def fprop(self,
-            theta: NestedMap,
             inputs: JTensor,
             paddings: JTensor,
             segment_mask: Optional[JTensor] = None,
@@ -1660,8 +1523,6 @@ class StackedTransformerRepeated(base_layer.BaseLayer):
     """Stacked Transformer layer.
 
     Args:
-      theta: A `NestedMap` object containing weights' values of this layer and
-        its children layers.
       inputs: Input sequence of shape [B, T, H].
       paddings: Input paddings of shape [B, T].
       segment_mask: Segment mask for packed input of shape [B, 1, T, T] ready to
@@ -1677,12 +1538,12 @@ class StackedTransformerRepeated(base_layer.BaseLayer):
       Output vector with shape [B, T, D].
     """
 
-    def sub_fprop_fn(sub, theta, inputs, *args: Any, **kwargs: Any):
+    def sub_fprop_fn(sub, inputs, *args: Any, **kwargs: Any):
       with py_utils.AuxLossContext(reentrant=True) as al_ctx:
         assert al_ctx is not None
         # sub is expected to be an instance of StackedTransformer
         assert isinstance(sub, StackedTransformer)
-        out = sub.fprop(theta, inputs, *args, **kwargs)
+        out = sub.fprop(inputs, *args, **kwargs)
 
         if al_ctx.aux_losses:
           assert isinstance(al_ctx.aux_losses, list)
@@ -1693,8 +1554,8 @@ class StackedTransformerRepeated(base_layer.BaseLayer):
 
         return out, NestedMap(aux_loss=aux_loss_inc)
 
-    out, stacked_extra = self.repeat.fprop(sub_fprop_fn, theta.repeat, inputs,
-                                           paddings, segment_mask, cross_inputs,
+    out, stacked_extra = self.repeat.fprop(sub_fprop_fn, inputs, paddings,
+                                           segment_mask, cross_inputs,
                                            cross_paddings, cross_segment_mask,
                                            segment_pos)
     aux_loss = jnp.sum(stacked_extra.aux_loss)
@@ -1705,13 +1566,10 @@ class StackedTransformerRepeated(base_layer.BaseLayer):
       aux_loss_ctx.AddLoss(aux_loss)
     return out
 
-  def init_states(self, theta: NestedMap, *args: Any,
-                  **kwargs: Any) -> NestedMap:
+  def init_states(self, *args: Any, **kwargs: Any) -> NestedMap:
     """Initialize the cache for the StackedTransformerRepeated layer.
 
     Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
       *args: Other arguments.
       **kwargs: Other keyword arguments.
 
@@ -1719,15 +1577,14 @@ class StackedTransformerRepeated(base_layer.BaseLayer):
       Initialized cache for decoding.
     """
 
-    def init_fn(block, theta, *args, **kwargs):
+    def init_fn(block, *args, **kwargs):
       assert isinstance(block, StackedTransformer)
-      return block.init_states(theta, *args, **kwargs)
+      return block.init_states(*args, **kwargs)
 
-    return self.repeat.init_states(init_fn, theta.repeat, *args, **kwargs)
+    return self.repeat.init_states(init_fn, *args, **kwargs)
 
   def extend_step(
       self,
-      theta: NestedMap,
       cached_states: NestedMap,
       inputs: JTensor,
       *,
@@ -1740,8 +1597,6 @@ class StackedTransformerRepeated(base_layer.BaseLayer):
     """Transformer stacked decoder layers, autoregressive cached decoding.
 
     Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
       cached_states: A `.NestedMap` object containing tensors which are the
         results of previous attentions, used for cached decoding.
         cached_states.x_layers is a list corresponding to self.x_layers with key
@@ -1766,13 +1621,12 @@ class StackedTransformerRepeated(base_layer.BaseLayer):
       - value - [T, B, N, H].
     """
 
-    def extend_fn(sub, theta, cached_states, step_inputs, *args, **kwargs):
+    def extend_fn(sub, cached_states, step_inputs, *args, **kwargs):
       assert isinstance(sub, StackedTransformer)
-      return sub.extend_step(theta, cached_states, step_inputs, *args, **kwargs)
+      return sub.extend_step(cached_states, step_inputs, *args, **kwargs)
 
     return self.repeat.extend_step(
         extend_fn,
-        theta.repeat,
         cached_states,
         inputs,
         time_step=time_step,
@@ -1797,6 +1651,8 @@ class PipelinedTransformer(base_layer.BaseLayer):
              'Size of each pipeline microbatch.')
     wp = p.weight_split_dims_mapping
     wp.Define('stages', [-1], 'How the num_stages dimension should be sharded.')
+    ap = p.activation_split_dims_mapping
+    ap.Define('final_out', None, 'How the final output should be sharded.')
     return p
 
   def __init__(self, params: InstantiableParams) -> None:
@@ -1818,18 +1674,16 @@ class PipelinedTransformer(base_layer.BaseLayer):
     self.create_child('pipeline', pipeline_params)
 
   def fprop(self,
-            theta: NestedMap,
             inputs: JTensor,
             paddings: JTensor,
             segment_mask: Optional[JTensor] = None,
             cross_inputs: Optional[JTensor] = None,
             cross_paddings: Optional[JTensor] = None,
-            cross_segment_mask: Optional[JTensor] = None) -> JTensor:
+            cross_segment_mask: Optional[JTensor] = None,
+            segment_pos: Optional[JTensor] = None) -> JTensor:
     """Pipelined Transformer layer.
 
     Args:
-      theta: A `NestedMap` object containing weights' values of this layer and
-        its children layers.
       inputs: Input sequence of shape [B, T, H].
       paddings: Input paddings of shape [B, T].
       segment_mask: Segment mask for packed input of shape [B, 1, T, T] ready to
@@ -1839,25 +1693,70 @@ class PipelinedTransformer(base_layer.BaseLayer):
       cross_paddings: Paddings for cross atention of shape [B, S].
       cross_segment_mask: Segment mask for encoder-decoder in packed input case
         of shape [B, 1, T, S].
+      segment_pos: Segment position of shape [B, T].
 
     Returns:
       Output vector with shape [B, T, D].
     """
-    return self.pipeline.fprop(
-        theta.pipeline,
+    p = self.params
+    if p.pipeline_stage.cls == StackedTransformer:
+      xformer_layer_p = p.pipeline_stage.transformer_layer_params_tpl
+    else:
+      assert p.pipeline_stage.cls == StackedTransformerRepeated
+      xformer_layer_p = p.pipeline_stage.block.transformer_layer_params_tpl
+    bld_mapping = xformer_layer_p.tr_atten_tpl.activation_split_dims_mapping.bld
+    # Annotate the inputs before the pipeline to prevent unexpected propagation
+    # from earlier layers.
+    inputs = base_layer.maybe_shard(inputs, bld_mapping, p.mesh_axis_names)
+    if bld_mapping is not None:
+      # Annotate other inputs.
+      paddings = base_layer.maybe_shard(paddings, bld_mapping[:-1],
+                                        p.mesh_axis_names)
+      # For cross inputs, we only specify the batch dim sharding.
+      if segment_mask is not None:
+        segment_mask = base_layer.maybe_shard(
+            segment_mask, [bld_mapping[0], -1, -1, -1],
+            p.mesh_axis_names,
+            unconstrained_dims=[1, 2, 3])
+      if cross_inputs is not None:
+        cross_inputs = base_layer.maybe_shard(
+            cross_inputs, [bld_mapping[0], -1, -1],
+            p.mesh_axis_names,
+            unconstrained_dims=[1, 2])
+      if cross_paddings is not None:
+        cross_paddings = base_layer.maybe_shard(
+            cross_paddings, [bld_mapping[0], -1],
+            p.mesh_axis_names,
+            unconstrained_dims=[1])
+      if cross_segment_mask is not None:
+        cross_segment_mask = base_layer.maybe_shard(
+            cross_segment_mask, [bld_mapping[0], -1, -1, -1],
+            p.mesh_axis_names,
+            unconstrained_dims=[1, 2, 3])
+      if segment_pos is not None:
+        segment_pos = base_layer.maybe_shard(segment_pos, bld_mapping[:-1],
+                                             p.mesh_axis_names)
+    outputs = self.pipeline.fprop(
         inputs,
         paddings,
         segment_mask=segment_mask,
         cross_inputs=cross_inputs,
         cross_paddings=cross_paddings,
-        cross_segment_mask=cross_segment_mask)
+        cross_segment_mask=cross_segment_mask,
+        segment_pos=segment_pos)
+    # Annotate the output to match input sharding.
+    outputs = base_layer.maybe_shard(outputs, bld_mapping, p.mesh_axis_names)
+    # Re-annotate the final output.
+    outputs = base_layer.maybe_shard(outputs,
+                                     p.activation_split_dims_mapping.final_out,
+                                     p.mesh_axis_names)
+    return outputs
 
-  def init_states(self, theta, *args, **kwargs) -> NestedMap:
+  def init_states(self, *args, **kwargs) -> NestedMap:
     raise NotImplementedError(type(self))
 
   def extend_step(
       self,
-      theta: NestedMap,
       cached_states: NestedMap,
       inputs: JTensor,
       *,
@@ -1868,1101 +1767,3 @@ class PipelinedTransformer(base_layer.BaseLayer):
       cross_segment_mask: Optional[JTensor] = None
   ) -> Tuple[JTensor, NestedMap]:
     raise NotImplementedError(type(self))
-
-
-class TransformerLm(base_layer.BaseLayer):
-  """Packed Transformer LM with position embedding and shared softmax layer.
-
-  This folds the padding with the segment mask when the inputs are not packed.
-  """
-
-  @classmethod
-  def Params(cls) -> InstantiableParams:
-    """Parameterization of this model."""
-    p = super().Params()
-    p.Define('position_emb_tpl', embedding_softmax.PositionalEmbedding.Params(),
-             'The Positional Embedding layer params.')
-    p.Define('model_dims', 0, 'Model dimension in Transformer layers.')
-    p.Define('stacked_transformer_tpl', StackedTransformer.Params(),
-             'StackedTransformer params tpl for the TransformerLm.')
-    p.Define(
-        'softmax_tpl',
-        embedding_softmax.SingleShardSharedEmbeddingSoftmax.Params(),
-        'The softmax layer params. By default the softmax layer is of type '
-        'SingleSharedEmbeddingSoftmax so the softmax and embedding lookup '
-        'share parameters in this case.')
-    p.Define('vocab_size', 0, 'Size of the vocabulary for LM.')
-    p.Define('packed_input', False, 'Whether the inputs are packed.')
-    p.Define('masked_lm', False, 'Whether this is BERT style masked LM.')
-    p.Define(
-        'ngrammer_tpl', None,
-        'Params for the Ngrammer layer. This param is shared between'
-        'the Ngrammer layer as well as the VQNgrammer layer. If this is None'
-        'then the Ngrammer layer is not used.')
-    p.Define(
-        'separate_embedding_tpl', None,
-        'Optional separate embedding lookup layer params. By default this is '
-        'None since the softmax and embedding lookup share parameters, however '
-        'if we wish to separate the parameters of embedding lookup and softmax '
-        'then we can set this param.')
-    p.Define('final_ln_tpl', normalizations.LayerNorm.Params(),
-             'Layer norm params.')
-    return p
-
-  @classmethod
-  def GLaMUniTransformerParams(cls,
-                               vocab_size,
-                               model_dim,
-                               ff_dim,
-                               attention_num_heads,
-                               attention_key_value_dim,
-                               num_transformer_layers,
-                               name='transformer',
-                               moe=False,
-                               moe_hidden_dim=None,
-                               ffn_activation='GATED_GELU',
-                               attention_extra_logit=0.0,
-                               relative_attention_num_buckets=32,
-                               relative_attention_max_distance=128,
-                               num_groups=1,
-                               c_dim=None,
-                               capacity_factor=0.0,
-                               e_dim=None,
-                               use_tgt_labels_size_as_loss_denominator=True,
-                               moe_load_balance_loss_weight=0.01,
-                               z_loss_weight=1e-4):
-    """Common setup for GLaM Decoder-only Transformer Model.
-
-    This function sets up configs for both MoE and dense GLaM models.
-    The MoE block consists of two transformer layer with the feedforward
-    sublayer of the first one replaced by a MoE layer. The dense block consists
-    of a transformer. The transformer layer used by GLam differs from the
-    standard transformer in these configs:
-
-    1) The feedforward sublayer used gated gleu so there are two wi and one wo.
-    2) No bias in all projections and embeddings.
-    3) Use no bias RMS norm for the layer norm.
-    4) Use relative attention bias.
-    5) Add an optional z-loss to stablize final softmax logits.
-
-    Args:
-      vocab_size: Size of the vocabulary for LM.
-      model_dim: model dimension.
-      ff_dim: hidden dimension of feed-forward inner layer.
-      attention_num_heads: number of attention heads.
-      attention_key_value_dim: key value dimension of attention inner layer.
-      num_transformer_layers: Number of transformer layers.
-      name: Name of the this layer
-      moe: If this is a moe block or not.
-      moe_hidden_dim: hidden dimension of MoE layer.
-      ffn_activation: Activation function used in the ffn layer.
-      attention_extra_logit: Extra logit for attention softmax.
-      relative_attention_num_buckets: Relative attention num buckets
-      relative_attention_max_distance: Max relative distance.
-      num_groups: Total number of groups for token dispatching in MoE layer.
-      c_dim: Expert capacity.
-      capacity_factor: This is the ratio between max allowed examples per expert
-        over the average number of examples per expert assuming routing is
-        completely uniform.
-      e_dim: Number of experts.
-      use_tgt_labels_size_as_loss_denominator: False to use total number of
-        non-padding tokens instead of fixed tgt_labels tensor size.
-      moe_load_balance_loss_weight: Weight of the aux loss for MoE layers.
-      z_loss_weight: additional loss term to stablize the final softmax logit.
-
-    Returns:
-      A Params object to set up a StackedTransformer.
-    """
-    p = cls.Params()
-    p.name = name
-    p.packed_input = True
-    p.model_dims = model_dim
-    p.vocab_size = vocab_size
-    p.position_emb_tpl = None
-
-    p.final_ln_tpl = normalizations.RmsNorm.Params().Set(
-        name='rms_norm', input_dims=model_dim)
-
-    p.softmax_tpl = (
-        embedding_softmax.GShardSharedEmebeddingSoftmax.Params().Set(
-            name='emb',
-            input_dims=model_dim,
-            num_classes=vocab_size,
-            z_loss_weight=z_loss_weight))
-    p.softmax_tpl.use_tgt_labels_size_as_loss_denominator = (
-        use_tgt_labels_size_as_loss_denominator)
-    glam_p = StackedTransformer.GLaMParams(
-        model_dim=model_dim,
-        ff_dim=ff_dim,
-        attention_num_heads=attention_num_heads,
-        attention_key_value_dim=attention_key_value_dim,
-        name='decoder_block',
-        moe=moe,
-        moe_hidden_dim=moe_hidden_dim,
-        ffn_activation=ffn_activation,
-        mask_self_attention=True,
-        cross_attention=False,
-        attention_extra_logit=attention_extra_logit,
-        relative_attention_num_buckets=relative_attention_num_buckets,
-        relative_attention_max_distance=relative_attention_max_distance,
-        moe_load_balance_loss_weight=moe_load_balance_loss_weight,
-        num_groups=num_groups,
-        c_dim=c_dim,
-        capacity_factor=capacity_factor,
-        e_dim=e_dim)
-
-    p.stacked_transformer_tpl = StackedTransformerRepeated.Params()
-    num_blocks = num_transformer_layers // 2 if moe else num_transformer_layers
-    p.stacked_transformer_tpl.Set(
-        name='decoder', block=glam_p, x_times=num_blocks)
-
-    return p
-
-  @classmethod
-  def set_sharding_params_v1(cls,
-                             lm_p,
-                             *,
-                             replica_axis,
-                             data_axis,
-                             mdl_axis,
-                             device_ids_mesh,
-                             mesh_axis_names,
-                             mode='train'):
-    """Set Canonical sharding params.
-
-    Args:
-      lm_p: A params of this class.
-      replica_axis: A string or int of the model replica axis name.
-      data_axis: A string or int of the data axis name.
-      mdl_axis: A string or int of the mdl axis name.
-      device_ids_mesh: A numpy array of device ids.
-      mesh_axis_names: A list of length len(device_ids_mesh.shape). Each element
-        of the list is the name of the corresponding device axis.
-      mode: The mode this model will be used in. Can be either 'train' or
-        'decode'.
-
-    Returns:
-      Params with sharding annotations added.
-    """
-    # In the following, model weights are layed out on the [data_axis, mdl_axis]
-    # 2d mesh. Model weights are always replicated over the replica_axis mesh
-    # axis.
-    #
-    # The batch axis of the activations are always sharded over the combination
-    # of (replica_axis, data_axis).
-    lm_p.device_mesh = device_ids_mesh
-    lm_p.mesh_axis_names = mesh_axis_names
-    # TODO(zhangqiaorjc): Remove once scan no longer needs explicit weight
-    # sharding annotations.
-    lm_p.stacked_transformer_tpl.device_mesh = device_ids_mesh
-    lm_p.stacked_transformer_tpl.mesh_axis_names = mesh_axis_names
-
-    # We assume activation batch is split on both replica_axis and data_axis.
-    batch_split = (replica_axis, data_axis)
-
-    if lm_p.position_emb_tpl is not None:
-      pos_emb_p = lm_p.position_emb_tpl
-      pos_emb_p.weight_split_dims_mapping.wt = [data_axis, mdl_axis]
-
-    # NGrammer embedding table is currently replicated.
-    # TODO(aurkor): Explore different sharding configs for the table.
-    # n-gram table is of shape [ngram_vocab_size, embedding_dims].
-    if lm_p.ngrammer_tpl is not None:
-      ngrammer_p = lm_p.ngrammer_tpl
-      ngrammer_p.weight_split_dims_mapping.wt = [mdl_axis, data_axis]
-
-    softmax_p = lm_p.softmax_tpl
-    if softmax_p.cls == embedding_softmax.GShardSharedEmebeddingSoftmax:
-      # Softmax weight is of shape [vocab_size, input_dim].
-      softmax_p.weight_split_dims_mapping.wt = [mdl_axis, data_axis]
-    else:
-      # Softmax weight is of shape [input_dim, vocab_size].
-      softmax_p.weight_split_dims_mapping.wt = [data_axis, mdl_axis]
-      softmax_p.lookup_style = 'matmul'
-    if mode == 'train':
-      # During training, softmax output is 3d.
-      softmax_p.activation_split_dims_mapping.out = [
-          batch_split, None, mdl_axis
-      ]
-    elif mode == 'decode':
-      # During decoding, output from softmax is 2d.
-      softmax_p.activation_split_dims_mapping.out = [batch_split, mdl_axis]
-    else:
-      raise NotImplementedError(f'mode {mode} not supported.')
-
-    softmax_p.activation_split_dims_mapping.emb_out_split_dims_mapping = [
-        batch_split, None, mdl_axis
-    ]
-
-    if lm_p.stacked_transformer_tpl.cls == StackedTransformer:
-      xformer_p = lm_p.stacked_transformer_tpl.transformer_layer_params_tpl
-    elif lm_p.stacked_transformer_tpl.cls == StackedTransformerRepeated:
-      xformer_p = (
-          lm_p.stacked_transformer_tpl.block.transformer_layer_params_tpl)
-    else:
-      assert False, f'{lm_p.stacked_transformer_tpl.cls} not supported.'
-
-    xformer_p.tr_atten_tpl.activation_split_dims_mapping.blnh = [
-        batch_split, None, mdl_axis, None
-    ]
-    xformer_p.tr_atten_tpl.activation_split_dims_mapping.bld = [
-        batch_split, None, mdl_axis
-    ]
-    # Attention project weight matrix is of shape [data_dim, num_heads,
-    # dim_per_head].
-    xformer_p.tr_atten_tpl.weight_split_dims_mapping.proj = [
-        data_axis, mdl_axis, None
-    ]
-    # Sharding for depth-wise conv weights. Depth-wise conv weights are of shape
-    # [num_heads, dim_per_head].
-    xformer_p.tr_atten_tpl.weight_split_dims_mapping.dconv = [mdl_axis, None]
-
-    ffw_wp = xformer_p.tr_fflayer_tpl.weight_split_dims_mapping
-    ffw_ap = xformer_p.tr_fflayer_tpl.activation_split_dims_mapping
-    ffw_wp.ffn0 = [data_axis, mdl_axis]
-    ffw_wp.ffn1 = [mdl_axis, data_axis]
-    if mode == 'train':
-      ffw_ap.ffn0 = [batch_split, None, mdl_axis]
-      ffw_ap.ffn1 = [batch_split, None, mdl_axis]
-    elif mode == 'decode':
-      # For decoding, we need to change them to [data_axis, mdl_axis] to match
-      # the shape of the input/output to/from the feedforward layers.
-      ffw_ap.ffn0 = [batch_split, mdl_axis]
-      ffw_ap.ffn1 = [batch_split, mdl_axis]
-    else:
-      raise NotImplementedError(f'mode {mode} not supported.')
-
-    # MoE
-    # Following GShard sharding settings for large 2D sharded models.
-    #
-    # TODO(lepikhin): Provide better reference.
-    #   lingvo/core/gshard_builder.py and
-    # specifically MoE splits
-    #   emh_split=[0, -1, 1],
-    #   ehm_split=[0, 1, -1],
-    #   egcm_split=[0, -1, -1, 1],
-    #   gecm_split=[0, -1, -1, 1],
-    #   gsec_split=[0, -1, -1, -1],
-    # for mesh with 2 dimensions.
-    if lm_p.stacked_transformer_tpl.cls == StackedTransformer:
-      moe_p = lm_p.stacked_transformer_tpl.moe_layer_tpl
-    elif lm_p.stacked_transformer_tpl.cls == StackedTransformerRepeated:
-      moe_p = lm_p.stacked_transformer_tpl.block.moe_layer_tpl
-    else:
-      assert False, f'{lm_p.stacked_transformer_tpl.cls} not supported.'
-    # Weights
-    moe_wp = moe_p.weight_split_dims_mapping
-    # TODO(lepikhin): RET_CHECK with [data_axis, None] http://b/209481545
-    moe_wp.me = [None, None]  # replicated
-    moe_wp.emh = [data_axis, None, mdl_axis]
-    moe_wp.ehm = [data_axis, mdl_axis, None]
-    # Activations
-    moe_ap = moe_p.activation_split_dims_mapping
-    moe_ap.gsm = [data_axis, None, mdl_axis]
-    moe_ap.gs = [data_axis, None]
-    moe_ap.gsec = [data_axis, None, None, None]  # dispatch and combine tensors
-    moe_ap.egcm = [data_axis, None, None, mdl_axis]
-    moe_ap.egch = [data_axis, None, None, mdl_axis]
-    moe_ap.gecm = [data_axis, None, None, mdl_axis]
-
-    return lm_p
-
-  def __init__(self, params: InstantiableParams) -> None:
-    """Constructor."""
-    super().__init__(params)
-    p = self.params
-
-    # Optional positional embedding layer.
-    if p.position_emb_tpl is not None:
-      pos_params = p.position_emb_tpl.Copy()
-      pos_params.embedding_dims = p.model_dims
-      self.create_child('position_emb', pos_params)
-
-    # Optional separate embedding layer.
-    if p.separate_embedding_tpl is not None:
-      emb_params = p.separate_embedding_tpl.Copy()
-      emb_params.embedding_dims = p.model_dims
-      emb_params.vocab_size = p.vocab_size
-      self.create_child('embedding_lookup', emb_params)
-
-    # Ngrammer layer.
-    if p.ngrammer_tpl is not None:
-      self.create_child('ngrammer', p.ngrammer_tpl)
-
-    # Transformer layers
-    if p.stacked_transformer_tpl.cls == StackedTransformer:
-      xformer_params = p.stacked_transformer_tpl
-    elif p.stacked_transformer_tpl.cls == StackedTransformerRepeated:
-      xformer_params = p.stacked_transformer_tpl.block
-    else:
-      assert False, f'{p.stacked_transformer_tpl.cls} not supported.'
-    assert (xformer_params.model_dims == 0 or
-            xformer_params.model_dims == p.model_dims)
-    xformer_params.model_dims = p.model_dims
-    if p.masked_lm:
-      xformer_params.mask_self_attention = False
-    else:
-      xformer_params.mask_self_attention = True
-    xformer_params.packed_input = p.packed_input
-    xformer_params.fold_padding_with_segment_mask = True
-
-    self.create_child('transformer', p.stacked_transformer_tpl)
-
-    # Final layer norm
-    if p.final_ln_tpl is not None:
-      ln_params = p.final_ln_tpl.Set(input_dims=p.model_dims)
-      self.create_child('final_ln', ln_params)
-
-    # Final softmax
-    softmax_params = p.softmax_tpl.Copy()
-    softmax_params.input_dims = p.model_dims
-    softmax_params.num_classes = p.vocab_size
-    self.create_child('softmax', softmax_params)
-
-  def init_states(self, theta: NestedMap, *args: Any,
-                  **kwargs: Any) -> NestedMap:
-    """Initialize the cache for the autoregressive decoding.
-
-    Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
-      *args: Other arguments.
-      **kwargs: Other keyword arguments.
-
-    Returns:
-      A `.NestedMap` corresponding to the cache.
-    """
-    return NestedMap(
-        step=jnp.array(0, dtype=jnp.uint32),
-        transformer=self.transformer.init_states(theta.transformer, *args,
-                                                 **kwargs))
-
-  def compute_loss(self,
-                   theta: NestedMap,
-                   activations: JTensor,
-                   labels: Optional[NestedMap] = None) -> NestedMap:
-    """Computes cross entropy loss.
-
-    Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
-      activations: Output of last layer of shape [B, T, D].
-      labels: A `.NestedMap` containing the following fields: class_weights, a
-        JTensor with shape [B, T] containing weights for each target word.
-        class_ids, a JTensor with shape [B, T] of int32 dtype containing the
-        target class labels. class_probabilities, a JTensor with shape [B, T, V]
-        of float values indicating class-membership probabilities.
-
-    Returns:
-      Returns xent_output, where `xent_output` is a `.NestedMap` as defined by
-      `SoftmaxLayer`'s return. In addition, per_sequence_xent is added which
-      equal to the sum of xent loss for tokens in a sequence.
-    """
-    if labels is None:
-      logits = self.softmax.get_logits(theta=theta.softmax, inputs=activations)
-      xent_output = NestedMap(logits=logits)
-      xent_output.log_probs = jax.nn.log_softmax(logits)
-      xent_output.probs = jax.nn.softmax(xent_output.logits)
-    else:
-      class_ids = None
-      class_probabilities = None
-      if 'class_ids' in labels:
-        class_ids = labels.class_ids[:, :, jnp.newaxis]
-      if 'class_probabilities' in labels:
-        class_probabilities = labels.class_probabilities
-      class_weights = labels.class_weights[:, :, jnp.newaxis]
-      xent_output = self.softmax.fprop(
-          theta.softmax,
-          activations,
-          class_weights,
-          class_ids=class_ids,
-          class_probabilities=class_probabilities)
-      per_token_xent = xent_output.per_example_xent * labels.class_weights
-      xent_output.per_token_xent = per_token_xent
-      xent_output.per_sequence_xent = jnp.sum(per_token_xent, -1)
-
-      # Compute aux_loss and add to avg_xent.
-      if AuxLossContext.Current() and AuxLossContext.Current().aux_losses:
-        aux_loss_tensors = AuxLossContext.Current().aux_losses
-        assert isinstance(aux_loss_tensors, list)
-        aux_loss = sum(aux_loss_tensors)
-      else:
-        aux_loss = 0.0
-      if not isinstance(aux_loss, jnp.ndarray):
-        aux_loss = jnp.array(aux_loss, dtype=self.fprop_dtype)
-      xent_output.aux_loss = aux_loss
-      # This is the loss to minimize.
-      xent_output.total_loss = xent_output.avg_xent + xent_output.aux_loss
-    return xent_output
-
-  def fprop(self,
-            theta: NestedMap,
-            inputs: JTensor,
-            paddings: JTensor,
-            labels: Optional[NestedMap] = None,
-            segment_ids: Optional[JTensor] = None,
-            segment_pos: Optional[JTensor] = None) -> NestedMap:
-    """Computes xent loss given the language model inputs.
-
-    Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
-      inputs: Input ids. An int32 JTensor of shape [B, T].
-      paddings: A 0/1 JTensor of shape [B, T] with 1 denoting padding.
-      labels: A `.NestedMap` containing the following fields: class_weights, a
-        JTensor with shape [batch, seqlen] containing weights for each target
-        word. class_ids, a JTensor with shape [B, T] of int32 dtype containing
-        the target class labels. class_probabilities, a JTensor with shape [B,
-        T, V] of float values indicating class-membership probabilities.
-      segment_ids: A JTensor of shape [B, T]. The segment that each token
-        belongs to.
-      segment_pos: A JTensor of shape [B, T]. The position of each token in a
-        segment.
-
-    Returns:
-      Returns xent_output, where
-      `xent_output` is a `.NestedMap` as defined by `SoftmaxLayer`'s return. In
-      addition, per_sequence_xent is added which equal to the sum of xent loss
-      for tokens in a sequence.
-    """
-    p = self.params
-    # reentrant=True, to enable scan-local context override.
-    with py_utils.AuxLossContext(reentrant=True) as aux_loss_ctx:
-      assert aux_loss_ctx is not None
-      # Get the input embeddings.
-      if self.params.separate_embedding_tpl is not None:
-        input_emb = self.embedding_lookup.fprop(theta.embedding_lookup, inputs)
-      else:
-        input_emb = self.softmax.emb_lookup(theta.softmax, inputs)
-      batch, seq_length = inputs.shape
-
-      if segment_ids is None:
-        assert segment_pos is None
-        # Fold the paddings with the segment mask
-        segment_ids = jnp.asarray(1 - paddings, jnp.int32)
-        segment_pos = jnp.tile(
-            jnp.arange(seq_length, dtype=jnp.int32)[None, :], [batch, 1])
-
-      # Add NGrammer to the source embeddings.
-      if p.ngrammer_tpl is not None:
-        input_emb = self.ngrammer.fprop(
-            theta.ngrammer,
-            input_ids=inputs,
-            input_embs=input_emb,
-            paddings=paddings,
-            segment_pos=segment_pos)
-
-      if p.position_emb_tpl is not None:
-        position_emb = self.position_emb.fprop(
-            theta.position_emb, seq_length=seq_length, position=segment_pos)
-        inputs = input_emb + position_emb
-      else:
-        inputs = input_emb
-
-      if p.masked_lm:
-        segment_mask = attentions.segment_mask(segment_ids, segment_ids,
-                                               inputs.dtype)
-      else:
-        segment_mask = attentions.causal_segment_mask(segment_ids, inputs.dtype)
-
-      output = self.transformer.fprop(
-          theta.transformer,
-          inputs,
-          paddings,
-          segment_mask=segment_mask,
-          segment_pos=segment_pos)
-
-      # Final layer norm
-      if p.final_ln_tpl is not None:
-        output = self.final_ln.fprop(theta.final_ln, output)
-      return self.compute_loss(theta, output, labels)
-
-  def extend_step(
-      self,
-      theta: NestedMap,
-      cached_states: NestedMap,
-      inputs: JTensor,
-  ) -> Tuple[NestedMap, NestedMap]:
-    """Autoregressive cached decoding of Transformer LM.
-
-    Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
-      cached_states: A `.NestedMap` object containing tensors which are the
-        results of previous attentions, used for cached decoding.
-        cached_states.transformer.x_layers is a list corresponding to
-        self.transformer.x_layers with key - [T, B, N, H]. value - [T, B, N, H].
-        cached_states.step corresponds to the current time step being decoded.
-      inputs: Target sequence of shape [B] or [B, P] corresponding to target
-        sequence at index time_step. Note that the shape [B, P] corresponds to a
-        prefix which is useful for decoding in some special architectures such
-        as Primer or Ngrammer.
-
-    Returns:
-      cached_states: A `.NestedMap` object containing the updated states. The
-        cached_states.step is incremented to the next time step, and
-        cached_states.transformer is updated with the keys and values of the
-        current time step.
-      xent_output: A `.NestedMap` object containing the log probabilities and
-        probabilities.
-    """
-    p = self.params
-    # Extend step should only be called with causal LM.
-    assert not p.masked_lm
-
-    if len(inputs.shape) == 1:
-      inputs = inputs[:, jnp.newaxis]
-
-    # Get the input embeddings.
-    if self.params.separate_embedding_tpl is not None:
-      input_emb = self.embedding_lookup.fprop(theta.embedding_lookup, inputs)
-    else:
-      input_emb = self.softmax.emb_lookup(theta.softmax, inputs)
-    time_step = cached_states.step
-
-    # Add Ngrammer layer if applicable.
-    if p.ngrammer_tpl is not None:
-      input_emb = self.ngrammer.fprop(
-          theta.ngrammer, inputs, input_emb, paddings=None, segment_pos=None)
-      inputs = inputs[:, -1][:, jnp.newaxis]
-      input_emb = input_emb[:, -1, :][:, jnp.newaxis, :]
-
-    if p.position_emb_tpl is not None:
-      # During autoregressive decoding inputs are not packed.
-      segment_pos = jnp.zeros((inputs.shape[0], 1)) + time_step
-      position_emb = self.position_emb.fprop(
-          theta.position_emb, seq_length=1, position=segment_pos)
-
-      inputs = input_emb + position_emb
-    else:
-      inputs = input_emb
-
-    updated_cache, outputs = self.transformer.extend_step(
-        theta.transformer,
-        cached_states.transformer,
-        inputs[:, 0, :],
-        time_step=time_step)
-    cached_states.transformer = updated_cache
-    cached_states.step += 1
-    if p.final_ln_tpl is not None:
-      outputs = self.final_ln.fprop(theta.final_ln, outputs)
-    xent_output = self.compute_loss(theta, outputs)
-    return cached_states, xent_output
-
-
-class TransformerEncoderDecoder(base_layer.BaseLayer):
-  """Transformer encoder/decoder class.
-
-  This uses the param `encoder_stacked_transformer_tpl` to set the configuration
-  for the encoder stack, and the param `decoder_stacked_transformer_tpl` to set
-  the configuration for the decoder stack.
-  """
-
-  @classmethod
-  def Params(cls) -> InstantiableParams:
-    """Parameterization of the Transformer encoder-decoder model."""
-    p = super().Params()
-    p.Define('position_emb_tpl', embedding_softmax.PositionalEmbedding.Params(),
-             'The Positional Embedding layer params for encoder and decoder.')
-    p.Define(
-        'encoder_stacked_transformer_tpl', None,
-        'StackedTransformer params tpl for the encoder. This must be set with '
-        'a value that is not None at initialization time.')
-    p.Define(
-        'encoder_ngrammer_tpl', None,
-        'Optional params for the Ngrammer layer for the encoder. This param is '
-        'shared between the Ngrammer layer as well as the VQNgrammer layer. If '
-        'this is None then the Ngrammer layer is not used.')
-    p.Define(
-        'encoder_embedding_tpl', None,
-        'Optional separate embedding layer for the source ids. By default this '
-        'is set to None, so the inputs and targets share the same set of '
-        'embeddings.')
-    p.Define(
-        'decoder_stacked_transformer_tpl', None,
-        'StackedTransformer params tpl for the decoder. This must be set with '
-        'a value that is not None at initialization time.')
-    p.Define(
-        'decoder_ngrammer_tpl', None,
-        'Optional params for the Ngrammer layer for the decoder. This param is '
-        'shared between the Ngrammer layer as well as the VQNgrammer layer. If '
-        'this is None then the Ngrammer layer is not used.')
-    p.Define(
-        'decoder_embedding_tpl', None,
-        'Optional separate embedding layer for the target ids. By default this '
-        'is set to None, so the embedding parameters are shared with the '
-        'softmax layer.')
-    p.Define(
-        'model_dims', 0, 'Model dimension of the Transformer layers. This '
-        'must match the model dimension of the encoder stack and the '
-        'decoder stack, as well as the embedding and softmax dimensions.')
-    p.Define(
-        'softmax_tpl',
-        embedding_softmax.SingleShardSharedEmbeddingSoftmax.Params(),
-        'The softmax layer params. By default the softmax layer is of type '
-        'SingleSharedEmbeddingSoftmax so the softmax and embedding lookup '
-        'share parameters in this case.')
-    p.Define('packed_input', False, 'Whether the inputs are packed.')
-    return p
-
-  def __init__(self, params):
-    # This will create a decoder (LM) with key transformer.
-    super().__init__(params)
-    p = self.params
-
-    def set_model_dims_and_packing(stacked_transformer_tpl, model_dims,
-                                   packed_input):
-      if stacked_transformer_tpl.cls == StackedTransformer:
-        assert (stacked_transformer_tpl.model_dims == 0 or
-                stacked_transformer_tpl.model_dims == model_dims)
-        stacked_transformer_tpl.model_dims = model_dims
-        stacked_transformer_tpl.packed_input = packed_input
-      elif stacked_transformer_tpl.cls == StackedTransformerRepeated:
-        assert (stacked_transformer_tpl.block.model_dims == 0 or
-                stacked_transformer_tpl.block.model_dims == model_dims)
-        stacked_transformer_tpl.block.model_dims = model_dims
-        stacked_transformer_tpl.block.packed_input = packed_input
-      else:
-        assert False, f'{stacked_transformer_tpl.cls} not supported.'
-
-    # Create position embeddings.
-    if p.position_emb_tpl is not None:
-      assert (p.position_emb_tpl.embedding_dims == 0 or
-              p.position_emb_tpl.embedding_dims == p.model_dims)
-      p.position_emb_tpl.embedding_dims = p.model_dims
-      self.create_child('position_emb', p.position_emb_tpl)
-
-    # Create the encoder.
-    if p.encoder_stacked_transformer_tpl is None:
-      raise ValueError(
-          'Encoder stack must be specified for TransformerEncoderDecoder.')
-
-    # Use the user specified StackedTransformer for the encoder, assuming
-    # everything is set up appropriately.
-    encoder_params = p.encoder_stacked_transformer_tpl.Copy()
-    set_model_dims_and_packing(encoder_params, p.model_dims, p.packed_input)
-    # Assert that encoder is not masked.
-    if encoder_params.cls == StackedTransformer:
-      mask_self_attention = encoder_params.mask_self_attention
-    elif encoder_params.cls == StackedTransformerRepeated:
-      mask_self_attention = encoder_params.block.mask_self_attention
-    else:
-      raise ValueError('Unknown encoder stack.')
-
-    if mask_self_attention:
-      raise ValueError(
-          'Encoder attention should be un-masked in TransformerEncoderDecoder.')
-    self.create_child('encoder', encoder_params)
-
-    # Optional separate embedding layer for source ids.
-    if p.encoder_embedding_tpl is not None:
-      encoder_embedding_params = p.encoder_embedding_tpl.Copy()
-      assert (encoder_embedding_params.embedding_dims == 0 or
-              encoder_embedding_params.embedding_dims == p.model_dims)
-      encoder_embedding_params.embedding_dims = p.model_dims
-      self.create_child('encoder_embedding_lookup', encoder_embedding_params)
-
-    # Optional NGrammer layer for the encoder.
-    # Paper: https://openreview.net/forum?id=GxjCYmQAody
-    if p.encoder_ngrammer_tpl is not None:
-      self.create_child('encoder_ngrammer', p.encoder_ngrammer_tpl)
-
-    # Encoder output layer norm.
-    encoder_ln_params = normalizations.LayerNorm.Params().Set(
-        input_dims=p.model_dims)
-    self.create_child('encoder_ln', encoder_ln_params)
-
-    # Create the decoder.
-    if p.decoder_stacked_transformer_tpl is None:
-      raise ValueError(
-          'Decoder stack must be specified for TransformerEncoderDecoder.')
-
-    # Use the user specified StackedTransformer for the decoder, assuming
-    # everything is set up appropriately.
-    decoder_params = p.decoder_stacked_transformer_tpl
-    set_model_dims_and_packing(decoder_params, p.model_dims, p.packed_input)
-    # Assert that decoder is masked.
-    # Assert that encoder is not masked.
-    if decoder_params.cls == StackedTransformer:
-      mask_self_attention = decoder_params.mask_self_attention
-    elif decoder_params.cls == StackedTransformerRepeated:
-      mask_self_attention = decoder_params.block.mask_self_attention
-    else:
-      raise ValueError('Unknown decoder stack.')
-
-    if not mask_self_attention:
-      raise ValueError(
-          'Decoder attention should be masked in TransformerEncoderDecoder.')
-    self.create_child('decoder', decoder_params)
-
-    # Optional separate embedding layer for target ids.
-    if p.decoder_embedding_tpl is not None:
-      decoder_embedding_params = p.decoder_embedding_tpl.Copy()
-      assert (decoder_embedding_params.embedding_dims == 0 or
-              decoder_embedding_params.embedding_dims == p.model_dims)
-      decoder_embedding_params.embedding_dims = p.model_dims
-      self.create_child('decoder_embedding_lookup', decoder_embedding_params)
-
-    # Optional NGrammer layer for the decoder.
-    # Paper: https://openreview.net/forum?id=GxjCYmQAody
-    if p.decoder_ngrammer_tpl is not None:
-      self.create_child('decoder_ngrammer', p.decoder_ngrammer_tpl)
-
-    # Decoder output layer norm.
-    decoder_ln_params = normalizations.LayerNorm.Params().Set(
-        input_dims=p.model_dims)
-    self.create_child('decoder_ln', decoder_ln_params)
-
-    # Final softmax.
-    softmax_params = p.softmax_tpl.Copy()
-    assert (softmax_params.input_dims == 0 or
-            softmax_params.input_dims == p.model_dims)
-    softmax_params.input_dims = p.model_dims
-    self.create_child('softmax', softmax_params)
-
-  def _encode(self,
-              theta: NestedMap,
-              inputs: JTensor,
-              input_paddings: JTensor,
-              input_segment_ids: Optional[JTensor] = None,
-              input_segment_pos: Optional[JTensor] = None) -> JTensor:
-    """Apply the Transformer encoder to the source sequence.
-
-    Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
-      inputs: Input ids. An int32 JTensor of shape [B, S].
-      input_paddings: A 0/1 JTensor of shape [B, S] with 1 denoting padding
-        correspdonding to the input sequence.
-      input_segment_ids: A JTensor of shape [B,S]. The segment that each input
-        token belongs to.
-      input_segment_pos: A JTensor of shape [B, S]. The position of each input
-        token within a segment.
-
-    Returns:
-      The encoded sequence after applying the Transformer encoder.
-    """
-    p = self.params
-    batch, seq_length = inputs.shape
-    if p.encoder_embedding_tpl is not None:
-      # Encoder has its own embedding lookup table for source ids.
-      input_emb = self.encoder_embedding_lookup.fprop(
-          theta.encoder_embedding_lookup, inputs)
-    elif p.decoder_embedding_tpl is not None:
-      # Encoder shares the same embedding as the target ids.
-      # The embedding lookup for target ids is separate from the softmax.
-      input_emb = self.decoder_embedding_lookup.fprop(
-          theta.decoder_embedding_lookup, inputs)
-    else:
-      # Encoder and decoder share the softmax and embedding params.
-      input_emb = self.softmax.emb_lookup(theta.softmax, inputs)
-
-    if input_segment_ids is None:
-      assert input_segment_pos is None
-      # Fold the paddings with the segment mask.
-      input_segment_ids = jnp.asarray(1 - input_paddings, jnp.int32)
-      input_segment_pos = jnp.tile(
-          jnp.arange(seq_length, dtype=jnp.int32)[None, :], [batch, 1])
-    assert input_segment_ids is not None
-    assert input_segment_pos is not None
-
-    # Add NGrammer to the source embeddings.
-    if p.encoder_ngrammer_tpl is not None:
-      input_emb = self.encoder_ngrammer.fprop(
-          theta.encoder_ngrammer,
-          input_ids=inputs,
-          input_embs=input_emb,
-          paddings=input_paddings,
-          segment_pos=input_segment_pos)
-
-    if p.position_emb_tpl is not None:
-      position_emb = self.position_emb.fprop(
-          theta.position_emb, seq_length=seq_length, position=input_segment_pos)
-      input_emb += position_emb
-
-    inputs_segment_mask = attentions.segment_mask(
-        input_segment_ids, dtype=input_emb.dtype)
-    encoder_output = self.encoder.fprop(
-        theta.encoder,
-        input_emb,
-        input_paddings,
-        segment_mask=inputs_segment_mask)
-
-    # Final layer norm for encoder output.
-    encoder_output = self.encoder_ln.fprop(theta.encoder_ln, encoder_output)
-    return encoder_output
-
-  def compute_loss(self,
-                   theta: NestedMap,
-                   activations: JTensor,
-                   labels: Optional[NestedMap] = None) -> NestedMap:
-    """Computes cross entropy loss.
-
-    Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
-      activations: Output of last layer of shape [B, T, D].
-      labels: A `.NestedMap` containing the following fields: class_weights, a
-        JTensor with shape [B, T] containing weights for each target word.
-        class_ids, a JTensor with shape [B, T] of int32 dtype containing the
-        target class labels. class_probabilities, a JTensor with shape [B, T, V]
-        of float values indicating class-membership probabilities.
-
-    Returns:
-      Returns xent_output, where `xent_output` is a `.NestedMap` as defined by
-      `SoftmaxLayer`'s return. In addition, per_sequence_xent is added which
-      equal to the sum of xent loss for tokens in a sequence.
-    """
-    if labels is None:
-      logits = self.softmax.get_logits(theta=theta.softmax, inputs=activations)
-      xent_output = NestedMap(logits=logits)
-      xent_output.log_probs = jax.nn.log_softmax(logits)
-      xent_output.probs = jax.nn.softmax(xent_output.logits)
-    else:
-      class_ids = None
-      class_probabilities = None
-      if 'class_ids' in labels:
-        class_ids = labels.class_ids[:, :, jnp.newaxis]
-      if 'class_probabilities' in labels:
-        class_probabilities = labels.class_probabilities
-      class_weights = labels.class_weights[:, :, jnp.newaxis]
-      xent_output = self.softmax.fprop(
-          theta.softmax,
-          activations,
-          class_weights,
-          class_ids=class_ids,
-          class_probabilities=class_probabilities)
-      per_token_xent = xent_output.per_example_xent * labels.class_weights
-      xent_output.per_token_xent = per_token_xent
-      xent_output.per_sequence_xent = jnp.sum(per_token_xent, -1)
-
-      # Compute aux_loss and add to avg_xent.
-      if AuxLossContext.Current() and AuxLossContext.Current().aux_losses:
-        aux_loss_tensors = AuxLossContext.Current().aux_losses
-        assert isinstance(aux_loss_tensors, list)
-        aux_loss = sum(aux_loss_tensors)
-      else:
-        aux_loss = 0.0
-      if not isinstance(aux_loss, jnp.ndarray):
-        aux_loss = jnp.array(aux_loss, dtype=self.fprop_dtype)
-      xent_output.aux_loss = aux_loss
-      # This is the loss to minimize.
-      xent_output.total_loss = xent_output.avg_xent + xent_output.aux_loss
-    return xent_output
-
-  def fprop(
-      self,
-      theta: NestedMap,
-      inputs: JTensor,
-      input_paddings: JTensor,
-      targets: JTensor,
-      target_paddings: JTensor,
-      labels: Optional[NestedMap] = None,
-      input_segment_ids: Optional[JTensor] = None,
-      input_segment_pos: Optional[JTensor] = None,
-      target_segment_ids: Optional[JTensor] = None,
-      target_segment_pos: Optional[JTensor] = None,
-  ) -> NestedMap:
-    """Computes xent loss given the sequence model inputs.
-
-    Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
-      inputs: Input ids. An int32 JTensor of shape [B, S].
-      input_paddings: A 0/1 JTensor of shape [B, S] with 1 denoting padding
-        correspdonding to the input sequence.
-      targets: Target ids. An int32 JTensor of shape [B, T].
-      target_paddings: A 0/1 JTensor of shape [B, T] with 1 denoting padding
-        corresponding to the target sequence.
-      labels: A `.NestedMap` containing the following fields: class_weights, a
-        JTensor with shape [batch, seqlen] containing weights for each target
-        word. class_ids, a JTensor with shape [B, T] of int32 dtype containing
-        the target class labels. class_probabilities, a JTensor with shape [B,
-        T, V] of float values indicating class-membership probabilities.
-      input_segment_ids: A JTensor of shape [B,S]. The segment that each input
-        token belongs to.
-      input_segment_pos: A JTensor of shape [B, S]. The position of each input
-        token within a segment.
-      target_segment_ids: A JTensor of shape [B,T]. The segment that each target
-        token belongs to.
-      target_segment_pos: A JTensor of shape [B, T]. The position of each target
-        token within a segment.
-
-    Returns:
-      Returns xent_output, where
-      `xent_output` is a `.NestedMap` as defined by `SoftmaxLayer`'s return. In
-      addition, per_sequence_xent is added which equal to the sum of xent loss
-      for tokens in a sequence.
-    """
-    # Get the input embeddings.
-    p = self.params
-    batch, seq_length = inputs.shape
-    _, target_seq_length = targets.shape
-
-    encoder_output = self._encode(theta, inputs, input_paddings,
-                                  input_segment_ids, input_segment_pos)
-
-    if p.decoder_embedding_tpl is not None:
-      # Targets have separate embedding params.
-      target_emb = self.decoder_embedding_lookup.fprop(
-          theta.decoder_embedding_lookup, targets)
-    else:
-      # Embedding parameters are shared with targets and softmax.
-      target_emb = self.softmax.emb_lookup(theta.softmax, targets)
-
-    if p.decoder_ngrammer_tpl is not None:
-      target_emb = self.decoder_ngrammer.fprop(
-          theta.decoder_ngrammer,
-          input_ids=targets,
-          input_embs=target_emb,
-          paddings=target_paddings,
-          segment_pos=target_segment_pos)
-
-    if p.position_emb_tpl is not None:
-      targets_position_emb = self.position_emb.fprop(
-          theta.position_emb,
-          seq_length=target_seq_length,
-          position=target_segment_pos)
-      target_emb += targets_position_emb
-
-    if input_segment_ids is None:
-      assert input_segment_pos is None
-      # Fold the paddings with the segment mask.
-      input_segment_ids = jnp.asarray(1 - input_paddings, jnp.int32)
-      input_segment_pos = jnp.tile(
-          jnp.arange(seq_length, dtype=jnp.int32)[None, :], [batch, 1])
-
-    if target_segment_ids is None:
-      assert target_segment_pos is None
-      # Fold the paddings with the segment mask.
-      target_segment_ids = jnp.asarray(1 - target_paddings, jnp.int32)
-      target_segment_pos = jnp.tile(
-          jnp.arange(target_seq_length, dtype=jnp.int32)[None, :], [batch, 1])
-
-    # Cross attention.
-    cross_segment_mask = attentions.segment_mask(target_segment_ids,
-                                                 input_segment_ids,
-                                                 target_emb.dtype)
-    target_segment_mask = attentions.causal_segment_mask(
-        target_segment_ids, target_emb.dtype)
-    output = self.decoder.fprop(
-        theta.decoder,
-        target_emb,
-        target_paddings,
-        target_segment_mask,
-        cross_inputs=encoder_output,
-        cross_paddings=input_paddings,
-        cross_segment_mask=cross_segment_mask)
-
-    # Final layer norm for decoder.
-    output = self.decoder_ln.fprop(theta.decoder_ln, output)
-
-    return self.compute_loss(theta, output, labels)
-
-  def init_states(self, theta: NestedMap, inputs: JTensor,
-                  input_paddings: JTensor, *args: Any,
-                  **kwargs: Any) -> NestedMap:
-    """Initialize the cache for autoregressive decoding.
-
-    Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
-      inputs: Input ids. An int32 JTensor of shape [B, S].
-      input_paddings: A 0/1 JTensor of shape [B, S] with 1 denoting padding
-        correspdonding to the input sequence.
-      *args: Other arguments.
-      **kwargs: Other keyword arguments.
-
-    Returns:
-      A `.NestedMap` corresponding to the cache.
-    """
-    cache = NestedMap(
-        step=jnp.array(0, dtype=jnp.uint32),
-        decoder=self.decoder.init_states(theta.decoder, *args, **kwargs))
-    encoder_output = self._encode(
-        theta,
-        inputs,
-        input_paddings,
-        input_segment_ids=None,
-        input_segment_pos=None)
-    cache.encoder_output = encoder_output
-    cache.input_paddings = input_paddings
-    return cache
-
-  def extend_step(self, theta: NestedMap, cached_states: NestedMap,
-                  targets: JTensor) -> Tuple[NestedMap, NestedMap]:
-    """Autoregressive cached decoding of the Transformer encoder decoder.
-
-    Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
-      cached_states: A `.NestedMap` object containing tensors which are the
-        results of previous attentions, used for cached decoding.
-        cached_states.transformer.x_layers is a list corresponding to
-        self.transformer.x_layers with key - [T, B, N, H]. value - [T, B, N, H].
-        cached_states.step corresponds to the current time step being decoded.
-        In addition, for the TransformerEncoderDecoder class, we also cache the
-        output of the encoder since that need not be computed afresh for every
-        time step.
-      targets: Target sequence of shape [B] or [B, P] corresponding to target
-        sequence at index time_step. Note that the shape [B, P] corresponds to a
-        prefix which is useful for decoding in some special architectures such
-        as Primer or Ngrammer.
-
-    Returns:
-      cached_states: A `.NestedMap` object containing the updated states. The
-        cached_states.step is incremented to the next time step, and
-        cached_states.transformer is updated with the keys and values of the
-        current time step.
-      xent_output: A `.NestedMap` object containing the log probabilities and
-        probabilities.
-    """
-    p = self.params
-    # Fetch encoder output from the cache.
-    encoder_output = cached_states.encoder_output
-    input_paddings = cached_states.input_paddings
-
-    # During autoregressive decoding inputs and targets are not packed.
-    if len(targets.shape) == 1:
-      targets = targets[:, jnp.newaxis]
-
-    if p.decoder_embedding_tpl is not None:
-      # Targets have separate embedding params.
-      target_emb = self.decoder_embedding_lookup.fprop(
-          theta.decoder_embedding_lookup, targets)
-    else:
-      # Embedding parameters are shared with targets and softmax.
-      target_emb = self.softmax.emb_lookup(theta.softmax, targets)
-
-    time_step = cached_states.step
-    if p.decoder_ngrammer_tpl is not None:
-      target_emb = self.decoder_ngrammer.fprop(
-          theta.decoder_ngrammer,
-          targets,
-          target_emb,
-          paddings=None,
-          segment_pos=None)
-
-    targets = targets[:, -1][:, jnp.newaxis]
-    target_emb = target_emb[:, -1, :][:, jnp.newaxis, :]
-
-    # Add position embeddings to target ids.
-    if p.position_emb_tpl is not None:
-      # During autoregressive decoding inputs are not packed.
-      segment_pos = jnp.zeros((targets.shape[0], 1)) + time_step
-      target_position_emb = self.position_emb.fprop(
-          theta.position_emb, seq_length=1, position=segment_pos)
-      target_emb += target_position_emb
-
-    updated_cache, outputs = self.decoder.extend_step(
-        theta.decoder,
-        cached_states.decoder,
-        target_emb[:, 0, :],
-        time_step=time_step,
-        cross_inputs=encoder_output,
-        cross_paddings=input_paddings)
-    cached_states.decoder = updated_cache
-    cached_states.step += 1
-    outputs = self.decoder_ln.fprop(theta.decoder_ln, outputs)
-    xent_output = self.compute_loss(theta, outputs)
-    return cached_states, xent_output

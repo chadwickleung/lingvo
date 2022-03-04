@@ -19,9 +19,9 @@ from absl import logging
 from absl.testing import absltest
 import jax
 from jax import numpy as jnp
-from jax import test_util
 from lingvo.jax import base_layer
 from lingvo.jax import py_utils
+from lingvo.jax import test_utils
 from lingvo.jax.layers import recurrent
 from lingvo.jax.layers import stochastics
 import numpy as np
@@ -30,7 +30,7 @@ import tensorflow.compat.v2 as tf
 NestedMap = py_utils.NestedMap
 
 
-class RecurrentTest(test_util.JaxTestCase):
+class RecurrentTest(test_utils.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -151,7 +151,7 @@ class RecurrentTest(test_util.JaxTestCase):
 
     def cell_fn(theta, state0, inputs_t):
       increment = theta.delta + inputs_t.x
-      increment = layer.fprop(theta.dropout, increment)
+      increment = layer.fprop(increment)
       y = state0.y + increment
       return NestedMap(y=y)
 

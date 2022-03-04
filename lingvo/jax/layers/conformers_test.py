@@ -1,18 +1,18 @@
 # Lint as: python3
-# # Copyright 2021 The TensorFlow Authors. All Rights Reserved.
-# #
-# # Licensed under the Apache License, Version 2.0 (the "License");
-# # you may not use this file except in compliance with the License.
-# # You may obtain a copy of the License at
-# #
-# #     http://www.apache.org/licenses/LICENSE-2.0
-# #
-# # Unless required by applicable law or agreed to in writing, software
-# # distributed under the License is distributed on an "AS IS" BASIS,
-# # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# # See the License for the specific language governing permissions and
-# # limitations under the License.
-# #
+# Copyright 2021 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 # ==============================================================================
 """Tests for conformers."""
 
@@ -20,7 +20,6 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from jax import numpy as jnp
-from jax import test_util
 from lingvo.core import cluster_factory
 from lingvo.core import conformer_layer
 from lingvo.jax import base_layer
@@ -34,8 +33,7 @@ to_np = test_utils.to_np
 NestedMap = py_utils.NestedMap
 
 
-@test_util.with_config(jax_numpy_rank_promotion='allow')
-class ConformerTest(test_util.JaxTestCase):
+class ConformerTest(test_utils.TestCase):
 
   @parameterized.parameters(
       (2, 10, 3, 8, 8, 4, 0.0),
@@ -74,15 +72,13 @@ class ConformerTest(test_util.JaxTestCase):
 
     context_p = base_layer.JaxContext.Params().Set(do_eval=True)
 
-    @jax.jit
-    def Comp(theta, inputs, paddings):
-      with cluster_factory.SetEval(True):
-        with base_layer.JaxContext.new_context(
-            params=context_p, prng_key=prng_key, global_step=jnp.asarray(0)):
-          output = conformer.fprop(theta, inputs, paddings)
-          return output
-
-    output = Comp(initial_vars, inputs, paddings)
+    output = test_utils.apply(
+        conformer,
+        initial_vars,
+        conformer.fprop,
+        inputs,
+        paddings,
+        context_p=context_p)
     # Test whether tf Conformer layer returns the same output
     # Modify initial_vars to use TF compatible params
     tf_initial_vars = test_utils.replace_jax_conformer_layer_vars_to_tf(
@@ -110,8 +106,7 @@ class ConformerTest(test_util.JaxTestCase):
     self.assertAllClose(tf_np_output, np_output, atol=1e-5)
 
 
-@test_util.with_config(jax_numpy_rank_promotion='allow')
-class StackedConformerTest(test_util.JaxTestCase):
+class StackedConformerTest(test_utils.TestCase):
 
   @parameterized.parameters(
       (2, 1, 10, 3, 8, 8, 4, 0.0),
@@ -126,10 +121,10 @@ class StackedConformerTest(test_util.JaxTestCase):
         name='conformer',
         input_dims=input_dims,
         model_dims=model_dims,
-        num_layers=2,
-        dropout_prob=dropout_prob)
+        num_layers=2)
     p.conformer_tpl.atten_num_heads = atten_num_heads
     p.conformer_tpl.kernel_size = kernel_size
+    p.conformer_tpl.dropout_prob = dropout_prob
 
     stacked_conformer = p.Instantiate()
     prng_key = jax.random.PRNGKey(seed=123)
@@ -143,15 +138,16 @@ class StackedConformerTest(test_util.JaxTestCase):
 
     context_p = base_layer.JaxContext.Params().Set(do_eval=True)
 
-    @jax.jit
-    def Comp(theta, inputs, paddings):
-      with cluster_factory.SetEval(True):
-        with base_layer.JaxContext.new_context(
-            params=context_p, prng_key=prng_key, global_step=jnp.asarray(0)):
-          output = stacked_conformer.fprop(theta, inputs, paddings)
-      return output
+    with cluster_factory.SetEval(True):
+      output = test_utils.apply(
+          stacked_conformer,
+          initial_vars,
+          stacked_conformer.fprop,
+          inputs,
+          paddings,
+          context_p=context_p,
+      )
 
-    output = Comp(initial_vars, inputs, paddings)
     self.assertEqual(output.shape, (batch_size, seq_len, model_dims))
 
 

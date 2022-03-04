@@ -19,7 +19,6 @@ from absl import logging
 from absl.testing import absltest
 import jax
 from jax import numpy as jnp
-from jax import test_util
 from lingvo.jax import base_layer
 from lingvo.jax import test_utils
 from lingvo.jax.layers import augmentations
@@ -28,7 +27,7 @@ import numpy as np
 to_np = test_utils.to_np
 
 
-class AugmentationsTest(test_util.JaxTestCase):
+class AugmentationsTest(test_utils.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -43,7 +42,7 @@ class AugmentationsTest(test_util.JaxTestCase):
       inputs = jnp.arange(10, dtype=jnp.int32)
       paddings = jnp.array([0, 0, 0, 0, 0, 0, 0, 0, 1.0, 1.0],
                            dtype=jnp.float32)
-      augmented_ids, augmented_pos = layer.fprop(None, inputs, paddings)
+      augmented_ids, augmented_pos = layer.fprop(inputs, paddings)
       logging.info('augmented_ids: %s', augmented_ids)
       logging.info('augmented_pos: %s', augmented_pos)
       expected_ids = np.array([0, 1, 2, 0, 0, 5, 6, 7, 8, 9])
@@ -59,7 +58,7 @@ class AugmentationsTest(test_util.JaxTestCase):
     with base_layer.JaxContext.new_context(prng_key=prng_key, global_step=1):
       inputs = jnp.arange(100, dtype=jnp.int32)
       paddings = jnp.zeros_like(inputs).astype(jnp.float32)
-      augmented_ids, augmented_pos = layer.fprop(None, inputs, paddings)
+      augmented_ids, augmented_pos = layer.fprop(inputs, paddings)
       logging.info('augmented_ids: %s', np.array_repr(augmented_ids))
       logging.info('augmented_pos: %s', np.array_repr(augmented_pos))
       expected_ids = np.array([

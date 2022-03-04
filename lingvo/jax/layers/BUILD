@@ -27,13 +27,17 @@ pytype_strict_library(
         ":objectives",
         ":pipeline",
         ":poolings",
+        ":quantizer",
         ":recurrent",
         ":repeats",
         ":resnets",
+        ":rnn_cell",
         ":spectrum_augmenter",
         ":stochastics",
+        ":transformer_models",
         ":transformers",
         ":vanillanets",
+        ":vit",
     ],
 )
 
@@ -90,6 +94,7 @@ pytype_strict_library(
         "//lingvo/jax:base_layer",
         "//lingvo/jax:py_utils",
         "//lingvo/jax:pytypes",
+        # Implicit numpy dependency.
     ],
 )
 
@@ -193,11 +198,9 @@ py_strict_test(
     srcs_version = "PY3",
     deps = [
         ":stats",
-        # Implicit absl.logging dependency.
         # Implicit absl.testing.absltest dependency.
-        # Implicit absl.testing.parameterized dependency.
         # Implicit jax dependency.
-        "//lingvo/jax:py_utils",
+        "//lingvo/jax:test_utils",
         # Implicit numpy dependency.
     ],
 )
@@ -303,13 +306,26 @@ py_strict_test(
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [
+        ":spectrum_augmenter",
         # Implicit absl.testing.absltest dependency.
         # Implicit jax dependency.
         "//lingvo/jax:base_layer",
         "//lingvo/jax:test_utils",
-        "//lingvo/jax/layers:spectrum_augmenter",
         # Implicit numpy dependency.
         # Implicit tensorflow dependency.
+    ],
+)
+
+pytype_strict_library(
+    name = "rnn_cell",
+    srcs = ["rnn_cell.py"],
+    srcs_version = "PY3",
+    deps = [
+        # Implicit jax dependency.
+        "//lingvo/jax:asserts",
+        "//lingvo/jax:base_layer",
+        "//lingvo/jax:py_utils",
+        "//lingvo/jax:pytypes",
     ],
 )
 
@@ -362,6 +378,7 @@ py_strict_test(
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [
+        ":conformers",
         # Implicit absl.testing.absltest dependency.
         # Implicit absl.testing.parameterized dependency.
         # Implicit jax dependency.
@@ -370,7 +387,6 @@ py_strict_test(
         "//lingvo/jax:base_layer",
         "//lingvo/jax:py_utils",
         "//lingvo/jax:test_utils",
-        "//lingvo/jax/layers:conformers",
         # Implicit numpy dependency.
         # Implicit tensorflow dependency.
     ],
@@ -399,7 +415,6 @@ pytype_strict_library(
     deps = [
         ":activations",
         ":attentions",
-        ":embedding_softmax",
         ":linears",
         ":normalizations",
         ":pipeline",
@@ -409,13 +424,67 @@ pytype_strict_library(
         ":stochastics",
         # Implicit absl.logging dependency.
         # Implicit jax dependency.
-        "//lingvo/jax:asserts",
         "//lingvo/jax:base_layer",
         "//lingvo/jax:gshard_utils",
         "//lingvo/jax:py_utils",
         "//lingvo/jax:pytypes",
         # Implicit numpy dependency.
-        # Implicit tensorflow dependency.
+    ],
+)
+
+pytype_strict_library(
+    name = "vit",
+    srcs = ["vit.py"],
+    deps = [
+        ":embedding_softmax",
+        ":linears",
+        ":normalizations",
+        ":poolings",
+        ":stochastics",
+        ":transformers",
+        "//third_party/py/einshape",
+        # Implicit jax dependency.
+        "//lingvo/jax:base_layer",
+        "//lingvo/jax:py_utils",
+        "//lingvo/jax:pytypes",
+    ],
+)
+
+pytype_strict_library(
+    name = "transformer_models",
+    srcs = ["transformer_models.py"],
+    deps = [
+        ":activations",
+        ":attentions",
+        ":embedding_softmax",
+        ":linears",
+        ":normalizations",
+        ":pipeline",
+        ":recurrent",
+        ":repeats",
+        ":stats",
+        ":stochastics",
+        ":transformers",
+        # Implicit absl.logging dependency.
+        # Implicit jax dependency.
+        "//lingvo/jax:base_layer",
+        "//lingvo/jax:gshard_utils",
+        "//lingvo/jax:py_utils",
+        "//lingvo/jax:pytypes",
+        # Implicit numpy dependency.
+    ],
+)
+
+py_strict_test(
+    name = "vit_test",
+    srcs = ["vit_test.py"],
+    deps = [
+        ":vit",
+        # Implicit absl.testing.absltest dependency.
+        # Implicit jax dependency.
+        "//lingvo/jax:test_utils",
+        # Implicit numpy dependency.
+        "//third_party/py/tensorflow:tensorflow_no_contrib",
     ],
 )
 
@@ -465,6 +534,7 @@ py_strict_test(
         # Implicit jax dependency.
         "//third_party/py/jax/experimental/jax2tf",
         "//lingvo/jax:pytypes",
+        "//lingvo/jax:test_utils",
         # Implicit numpy dependency.
         # Implicit tensorflow dependency.
     ],
@@ -569,12 +639,10 @@ py_strict_test(
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [
-        ":objectives",
         ":quantizer",
         # Implicit absl.testing.absltest dependency.
         # Implicit absl.testing.parameterized dependency.
         # Implicit jax dependency.
-        "//lingvo/core:layers",
         "//lingvo/jax:test_utils",
         # Implicit numpy dependency.
         # Implicit tensorflow dependency.
@@ -588,9 +656,7 @@ py_strict_test(
     srcs_version = "PY3",
     deps = [
         ":objectives",
-        # Implicit absl.logging dependency.
         # Implicit absl.testing.absltest dependency.
-        # Implicit jax dependency.
         "//lingvo/jax:test_utils",
         # Implicit numpy dependency.
     ],
@@ -609,6 +675,25 @@ py_strict_test(
         # Implicit jax dependency.
         "//lingvo/jax:base_layer",
         "//lingvo/jax:py_utils",
+        "//lingvo/jax:test_utils",
+        # Implicit numpy dependency.
+        # Implicit tensorflow dependency.
+    ],
+)
+
+py_strict_test(
+    name = "rnn_cell_test",
+    srcs = ["rnn_cell_test.py"],
+    python_version = "PY3",
+    srcs_version = "PY3",
+    deps = [
+        ":rnn_cell",
+        # Implicit absl.testing.absltest dependency.
+        # Implicit absl.testing.parameterized dependency.
+        # Implicit jax dependency.
+        "//lingvo/core:rnn_cell",
+        "//lingvo/jax:py_utils",
+        "//lingvo/jax:test_utils",
         # Implicit numpy dependency.
         # Implicit tensorflow dependency.
     ],
@@ -634,27 +719,46 @@ py_strict_test(
     size = "large",
     srcs = ["transformers_test.py"],
     python_version = "PY3",
-    # TODO(BF-JAX): Consider splitting this module into
-    # transformers and transformers_models since this is growing
-    # too big.
-    shard_count = 29,
+    shard_count = 20,
     srcs_version = "PY3",
     deps = [
         ":attentions",
-        ":embedding_softmax",
-        ":ngrammer",
         ":transformers",
         # Implicit absl.logging dependency.
         # Implicit absl.testing.absltest dependency.
         # Implicit absl.testing.parameterized dependency.
         # Implicit jax dependency.
         "//lingvo/core:batch_major_attention",
-        "//lingvo/core:gshard_builder",
         "//lingvo/core:layers_with_attention",
         "//lingvo/jax:base_layer",
         "//lingvo/jax:py_utils",
         "//lingvo/jax:test_utils",
         # Implicit numpy dependency.
         # Implicit tensorflow dependency.
+        "//third_party/py/tensorflow:tensorflow_no_contrib",
+    ],
+)
+
+py_strict_test(
+    name = "transformer_models_test",
+    srcs = ["transformer_models_test.py"],
+    python_version = "PY3",
+    shard_count = 25,
+    srcs_version = "PY3",
+    deps = [
+        ":embedding_softmax",
+        ":ngrammer",
+        ":transformer_models",
+        ":transformers",
+        # Implicit absl.logging dependency.
+        # Implicit absl.testing.absltest dependency.
+        # Implicit absl.testing.parameterized dependency.
+        # Implicit jax dependency.
+        "//lingvo/core:gshard_builder",
+        "//lingvo/jax:base_layer",
+        "//lingvo/jax:py_utils",
+        "//lingvo/jax:test_utils",
+        # Implicit numpy dependency.
+        "//third_party/py/tensorflow:tensorflow_no_contrib",
     ],
 )

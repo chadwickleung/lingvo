@@ -19,7 +19,6 @@
 from absl.testing import absltest
 import jax
 from jax import numpy as jnp
-from jax import test_util
 from lingvo.jax import base_layer
 from lingvo.jax import test_utils
 from lingvo.jax.layers import spectrum_augmenter
@@ -28,7 +27,7 @@ import numpy as np
 to_np = test_utils.to_np
 
 
-class SpectrumAugmenterTest(test_util.JaxTestCase):
+class SpectrumAugmenterTest(test_utils.TestCase):
 
   def testSpectrumAugmenterWithTimeMask(self):
     batch_size = 5
@@ -49,28 +48,31 @@ class SpectrumAugmenterTest(test_util.JaxTestCase):
     p.time_mask_max_ratio = 1.
     specaug_layer = p.Instantiate()
     expected_output = np.array(
-        [[[1., 1.], [1., 1.], [0., 0.], [1., 1.], [0., 0.], [1., 1.], [1., 1.],
-          [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.],
+        [[[1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.],
+          [1., 1.], [0., 0.], [0., 0.], [0., 0.], [0., 0.], [1., 1.], [1., 1.],
           [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.]],
-         [[1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [0., 0.], [0., 0.],
-          [1., 1.], [1., 1.], [0., 0.], [0., 0.], [0., 0.], [0., 0.], [1., 1.],
+         [[1., 1.], [1., 1.], [1., 1.], [1., 1.], [0., 0.], [1., 1.], [0., 0.],
+          [0., 0.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.],
           [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.]],
-         [[1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [0., 0.], [1., 1.],
-          [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.],
+         [[1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.],
+          [0., 0.], [0., 0.], [0., 0.], [1., 1.], [1., 1.], [1., 1.], [1., 1.],
+          [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.]],
+         [[1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [0., 0.],
+          [0., 0.], [1., 1.], [1., 1.], [0., 0.], [0., 0.], [0., 0.], [0., 0.],
           [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.]],
          [[1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.],
           [1., 1.], [1., 1.], [1., 1.], [1., 1.], [0., 0.], [0., 0.], [0., 0.],
-          [0., 0.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.]],
-         [[1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.],
-          [0., 0.], [0., 0.], [1., 1.], [0., 0.], [0., 0.], [0., 0.], [1., 1.],
-          [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.]]])
+          [0., 0.], [1., 1.], [1., 1.], [1., 1.], [1., 1.], [1., 1.]]])
     context_p = base_layer.JaxContext.Params().Set(do_eval=False)
     prng_key = jax.random.PRNGKey(seed=23456)
     theta = specaug_layer.instantiate_variables(prng_key)
-
-    with base_layer.JaxContext.new_context(
-        params=context_p, prng_key=prng_key, global_step=jnp.asarray(0)):
-      actual_layer_output, _ = specaug_layer.fprop(theta, inputs, paddings)
+    actual_layer_output, _ = test_utils.apply(
+        specaug_layer,
+        theta,
+        specaug_layer.fprop,
+        inputs,
+        paddings,
+        context_p=context_p)
     self.assertAllClose(actual_layer_output, expected_output)
 
   def testSpectrumAugmenterWithFrequencyMask(self):
@@ -85,30 +87,33 @@ class SpectrumAugmenterTest(test_util.JaxTestCase):
     # pyformat: disable
     # pylint: disable=bad-whitespace,bad-continuation
     expected_output = np.array(
-        [[[1., 1., 1., 0., 0., 0., 1., 1., 1., 1.],
-          [1., 1., 1., 0., 0., 0., 1., 1., 1., 1.],
-          [1., 1., 1., 0., 0., 0., 1., 1., 1., 1.],
-          [1., 1., 1., 0., 0., 0., 1., 1., 1., 1.],
-          [1., 1., 1., 0., 0., 0., 1., 1., 1., 1.]],
-         [[1., 1., 1., 1., 1., 0., 0., 0., 0., 1.],
+        [[[1., 1., 1., 1., 1., 0., 0., 0., 0., 1.],
           [1., 1., 1., 1., 1., 0., 0., 0., 0., 1.],
           [1., 1., 1., 1., 1., 0., 0., 0., 0., 1.],
           [1., 1., 1., 1., 1., 0., 0., 0., 0., 1.],
           [1., 1., 1., 1., 1., 0., 0., 0., 0., 1.]],
-         [[1., 1., 0., 1., 1., 0., 0., 0., 1., 1.],
-          [1., 1., 0., 1., 1., 0., 0., 0., 1., 1.],
-          [1., 1., 0., 1., 1., 0., 0., 0., 1., 1.],
-          [1., 1., 0., 1., 1., 0., 0., 0., 1., 1.],
-          [1., 1., 0., 1., 1., 0., 0., 0., 1., 1.]]])
+         [[1., 1., 1., 1., 1., 0., 0., 0., 1., 1.],
+          [1., 1., 1., 1., 1., 0., 0., 0., 1., 1.],
+          [1., 1., 1., 1., 1., 0., 0., 0., 1., 1.],
+          [1., 1., 1., 1., 1., 0., 0., 0., 1., 1.],
+          [1., 1., 1., 1., 1., 0., 0., 0., 1., 1.]],
+         [[1., 1., 0., 1., 1., 1., 1., 1., 1., 1.],
+          [1., 1., 0., 1., 1., 1., 1., 1., 1., 1.],
+          [1., 1., 0., 1., 1., 1., 1., 1., 1., 1.],
+          [1., 1., 0., 1., 1., 1., 1., 1., 1., 1.],
+          [1., 1., 0., 1., 1., 1., 1., 1., 1., 1.]]])
     # pylint: enable=bad-whitespace,bad-continuation
     # pyformat: enable
     context_p = base_layer.JaxContext.Params().Set(do_eval=False)
     prng_key = jax.random.PRNGKey(seed=34567)
     theta = specaug_layer.instantiate_variables(prng_key)
-
-    with base_layer.JaxContext.new_context(
-        params=context_p, prng_key=prng_key, global_step=jnp.asarray(0)):
-      actual_layer_output, _ = specaug_layer.fprop(theta, inputs, paddings)
+    actual_layer_output, _ = test_utils.apply(
+        specaug_layer,
+        theta,
+        specaug_layer.fprop,
+        inputs,
+        paddings,
+        context_p=context_p)
     self.assertAllClose(actual_layer_output, expected_output)
 
 

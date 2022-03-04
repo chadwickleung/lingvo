@@ -18,7 +18,7 @@
 Models are typically named as '<task>.<module>.<model>'.
 """
 
-from typing import Optional
+from typing import Mapping, Optional
 
 from absl import logging
 from lingvo.jax import base_model_params
@@ -49,13 +49,23 @@ class _ModelRegistryHelper:
 
   @classmethod
   def register_model(cls, model_class: BaseModelParamsT) -> BaseModelParamsT:
-    """Registers a model class in the global registry."""
+    """Registers a model class into the global registry."""
     key = cls._class_path_prefix() + '.' + _model_class_key(model_class)
     if key in cls._registry:
       raise ValueError(f'Model `{key}` already registed.')
     logging.info('Registering model %s as %s', model_class, key)
     cls._registry[key] = model_class
     return model_class
+
+  @classmethod
+  def unregister_model(cls, key: str) -> None:
+    """Unregisters a model class from the global registry."""
+    key_r = cls._class_path_prefix() + '.' + key
+    if key_r not in cls._registry:
+      logging.warning('Model `%s` not found in the registry.', key)
+      return
+    logging.info('Unregistering model `%s` from the registry.', key)
+    del cls._registry[key_r]
 
   @classmethod
   def get_model(cls, key: str) -> Optional[BaseModelParamsT]:
@@ -66,6 +76,15 @@ class _ModelRegistryHelper:
         logging.info('Known model: %s', k)
     return cls._registry.get(key)
 
+  @classmethod
+  def get_all_registered_models(cls) -> Mapping[str, BaseModelParamsT]:
+    """Retrieves all the models from the global registry."""
+    if not cls._registry:
+      logging.warning('Model registry is empty.')
+    return cls._registry
+
 
 register_model = _ModelRegistryHelper.register_model
+unregister_model = _ModelRegistryHelper.unregister_model
 get_model = _ModelRegistryHelper.get_model
+get_all_registered_models = _ModelRegistryHelper.get_all_registered_models

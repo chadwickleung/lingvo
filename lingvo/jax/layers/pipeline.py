@@ -18,6 +18,7 @@
 from absl import logging
 import jax
 from jax import numpy as jnp
+from jax.experimental import maps
 from lingvo.jax import base_layer
 from lingvo.jax import py_utils
 from lingvo.jax import pytypes
@@ -65,7 +66,7 @@ class LayerwiseShardablePipelined(base_layer.BaseLayer):
         shifted_state = jnp.pad(state, [[1, 0], ...])[:-1]
         in_mask = jnp.equal(jnp.arange(num_stages), 0)
         stages_in = jnp.where(in_mask, padded_input[i],  shifted_state)
-        state = vmap(single_stage_body.fprop)(theta.body, stages_in)
+        state = vmap(single_stage_body.fprop)(stages_in)
   """
 
   @classmethod
@@ -125,8 +126,8 @@ class LayerwiseShardablePipelined(base_layer.BaseLayer):
       else:
         base_layer.add_summary('{summary_key}', summary_value, summary_type)
 
-  def body_fprop(self, theta: NestedMap, per_stage_inputs: JTensor,
-                 *per_stage_args, **per_stage_kwargs) -> NestedJTensor:
+  def body_fprop(self, per_stage_inputs: JTensor, *per_stage_args,
+                 **per_stage_kwargs) -> NestedJTensor:
     """Runs the fprop function of the stages."""
     p = self.params
     if p.mesh_axis_names is not None:
@@ -150,19 +151,22 @@ class LayerwiseShardablePipelined(base_layer.BaseLayer):
     def _wrapped_fn(theta, per_stage_inputs, *per_stage_args,
                     **per_stage_kwargs):
       with base_layer.JaxContext.new_context(
-          prng_key=prng_key, global_step=global_step):
-        res = self.body.fprop(theta, per_stage_inputs, *per_stage_args,
+          prng_key=prng_key, global_step=global_step) as jax_ctx:
+        jax_ctx.bind(self.body, self.body.vars_to_flax_vars(theta),
+                     [base_layer.SCOPE_AUX_LOSS])
+        res = self.body.fprop(per_stage_inputs, *per_stage_args,
                               **per_stage_kwargs)
         summaries = base_layer.all_summaries()
         return res, summaries
 
-    res, summaries = jax.vmap(_wrapped_fn)(theta.body, per_stage_inputs,
-                                           *per_stage_args, **per_stage_kwargs)
+    res, summaries = jax.vmap(_wrapped_fn)(self.body.local_theta(),
+                                           per_stage_inputs, *per_stage_args,
+                                           **per_stage_kwargs)
 
     self._forward_summary(summaries)
     return res
 
-  def fprop(self, theta: NestedMap, inputs: NestedJTensor, *broadcast_inputs,
+  def fprop(self, inputs: NestedJTensor, *broadcast_inputs,
             **broadcast_kwargs) -> NestedJTensor:
     """FProp inputs through the pipeline body.
 
@@ -173,7 +177,6 @@ class LayerwiseShardablePipelined(base_layer.BaseLayer):
     outputs are expected to be of the same structure as inputs.
 
     Args:
-      theta: The combined layer params for all pipeline stages.
       inputs: Inputs to body_fprop, same structure as outputs.
       *broadcast_inputs: Broadcasted args to body_fprop.
       **broadcast_kwargs: Broadcasted kwargs to body_fprop
@@ -230,7 +233,12 @@ class LayerwiseShardablePipelined(base_layer.BaseLayer):
     state0 = jax.tree_map(
         lambda x: jnp.zeros((L,) + x.shape[1:], dtype=x.dtype), padded_inputs)
 
+    theta = self.local_theta()
     def _scan_fn(carry, xs):
+      jax_context = base_layer.cur_jax_context()
+      flax_theta = self.vars_to_flax_vars(theta)
+      jax_context.bind(self, flax_theta, [base_layer.SCOPE_AUX_LOSS])
+
       in_state, loop_iter, inp = carry.data, carry.loop_iter, xs.inputs
 
       # Bring in the next microbatch.
@@ -243,20 +251,43 @@ class LayerwiseShardablePipelined(base_layer.BaseLayer):
       # Different stages need args from different microbatches.
       microbatch_ids = (loop_iter - jnp.arange(L) +
                         num_microbatches) % num_microbatches
-      per_stage_args = jax.tree_map(lambda x: x[microbatch_ids],
-                                    broadcast_inputs)
-      per_stage_kwargs = jax.tree_map(lambda x: x[microbatch_ids],
-                                      broadcast_kwargs)
+
+      def _gather(xs):
+
+        def _gather_one(x, i):
+          return x[i]
+
+        if p.mesh_axis_names is not None:
+          # When the stage dim is partitioned, we use xmap (with manual sharding
+          # implementation) to make sure it's trivially partitioned on the stage
+          # dim and work around some potential optimization problems in XLA.
+          # TODO(yuanzx): Use xmap on the whole body fprop.
+          mesh_axis = base_layer.to_partition_spec(
+              p.weight_split_dims_mapping.stages, p.mesh_axis_names)[0]
+          if mesh_axis is not None:
+            axis_resources = {'num_stages': mesh_axis}
+            return maps.xmap(
+                _gather_one,
+                # broadcast_inputs are replicated across stages, but IDs are
+                # per-stage.
+                in_axes=([...], ['num_stages', ...]),
+                out_axes=['num_stages', ...],
+                axis_resources=axis_resources)(xs, microbatch_ids)
+        return xs[microbatch_ids]
+
+      per_stage_args = jax.tree_map(_gather, broadcast_inputs)
+      per_stage_kwargs = jax.tree_map(_gather, broadcast_kwargs)
 
       # Run through pipeline body.
-      out_state = self.body_fprop(theta, stages_in, *per_stage_args,
+      out_state = self.body_fprop(stages_in, *per_stage_args,
                                   **per_stage_kwargs)
       py_utils.assert_same_shape_and_dtype(stages_in, out_state)
 
       # Shift state to the right by 1.
       def _shift_right(x):
-        padding = [[1, 0]] + [[0, 0]] * (len(x.shape) - 1)
-        return jnp.pad(x, padding)[0:L, ...]
+        padding = [[1, 0]] + [[0, 0]] * (x.ndim - 1)
+        # Use lax.slice to guarantee the gradient is a pad.
+        return jax.lax.slice(jnp.pad(x, padding), [0] * x.ndim, x.shape)
 
       shifted_out_state = jax.tree_map(_shift_right, out_state)
       # Accumulator saves out_state for final output retrieval.
@@ -275,7 +306,13 @@ class LayerwiseShardablePipelined(base_layer.BaseLayer):
     del summaries
 
     # Extract output from the last stage after num_stages-1 bubbles.
-    output = jax.tree_map(lambda x: x[L - 1:, -1, ...], accum.data)
+    def _extract_out(x):
+      # Use lax.slice to guarantee the gradient is a pad.
+      return jnp.squeeze(
+          jax.lax.slice(x, [L - 1, x.shape[1] - 1] + [0] * (x.ndim - 2),
+                        x.shape), 1)
+
+    output = jax.tree_map(_extract_out, accum.data)
 
     if needs_microbatching:
 

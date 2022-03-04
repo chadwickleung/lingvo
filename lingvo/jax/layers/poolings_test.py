@@ -19,7 +19,6 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from jax import numpy as jnp
-from jax import test_util
 from lingvo.core import layers as lingvo_layers
 from lingvo.jax import test_utils
 from lingvo.jax.layers import poolings
@@ -29,7 +28,7 @@ import tensorflow.compat.v2 as tf
 to_np = test_utils.to_np
 
 
-class PoolingsTest(test_util.JaxTestCase):
+class PoolingsTest(test_utils.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -65,7 +64,8 @@ class PoolingsTest(test_util.JaxTestCase):
     inputs = jnp.asarray(npy_inputs)
     paddings = None
     tf_paddings = None
-    output, _ = pooling_layer.fprop(initial_vars, inputs, paddings)
+    output, _ = test_utils.apply(pooling_layer, initial_vars,
+                                 pooling_layer.fprop, inputs, paddings)
     # Test whether tf Pooling layer returns the same output.
     # Modify initial_vars to use TF compatible params.
     tf_initial_vars = initial_vars
@@ -122,7 +122,9 @@ class PoolingsTest(test_util.JaxTestCase):
           0, 2, [input_shape[0], input_shape[1]]).astype(npy_inputs.dtype)
     paddings = jnp.asarray(npy_paddings)
     tf_paddings = tf.constant(npy_paddings, dtype=tf.float32)
-    output, out_paddings = pooling_layer.fprop(initial_vars, inputs, paddings)
+    output, out_paddings = test_utils.apply(pooling_layer, initial_vars,
+                                            pooling_layer.fprop, inputs,
+                                            paddings)
     # Test whether tf Pooling layer returns the same output.
     # Modify initial_vars to use TF compatible params.
     tf_initial_vars = initial_vars

@@ -75,12 +75,18 @@ def _compute_xent_loss_helper(
   mean_acc = jnp.sum(
       (labels == predicted_labels) * weights) / jnp.maximum(num_preds, 1)
   metric_weight = jnp.array(num_preds, predictions.avg_xent.dtype)
+
+  if hasattr(predictions, 'avg_xent_weight'):
+    avg_xent_weight = predictions.avg_xent_weight
+  else:
+    avg_xent_weight = metric_weight
+
   metrics = NestedMap(
       total_loss=(predictions.total_loss, metric_weight),
-      avg_xent=(predictions.avg_xent, metric_weight),
+      avg_xent=(predictions.avg_xent, avg_xent_weight),
       aux_loss=(predictions.aux_loss, jnp.array(1.0,
                                                 predictions.aux_loss.dtype)),
-      log_pplx=(predictions.avg_xent, metric_weight),
+      log_pplx=(predictions.avg_xent, avg_xent_weight),
       fraction_of_correct_next_step_preds=(mean_acc, metric_weight),
       num_predictions=(num_preds, jnp.array(1.0, num_preds.dtype)),
   )
@@ -90,15 +96,15 @@ def _compute_xent_loss_helper(
   return metrics, per_example_output
 
 
-def _greedy_decode(extend_step_fn: Callable[[NestedMap, JTensor],
-                                            Tuple[NestedMap, JTensor]],
-                   decoder_state: NestedMap,
-                   target_ids: JTensor,
-                   target_paddings: JTensor,
-                   seq_len: int,
-                   max_decode_steps: Optional[int] = None,
-                   prefix_lengths: Optional[JTensor] = None,
-                   eos_id: Optional[int] = None) -> NestedMap:
+def greedy_decode(extend_step_fn: Callable[[NestedMap, JTensor],
+                                           Tuple[NestedMap, JTensor]],
+                  decoder_state: NestedMap,
+                  target_ids: JTensor,
+                  target_paddings: JTensor,
+                  seq_len: int,
+                  max_decode_steps: Optional[int] = None,
+                  prefix_lengths: Optional[JTensor] = None,
+                  eos_id: Optional[int] = None) -> NestedMap:
   """Greedy decode the input batch.
 
   Args:
@@ -217,8 +223,7 @@ def _greedy_decode(extend_step_fn: Callable[[NestedMap, JTensor],
 class BaseModel(base_layer.BaseLayer):
   """An API that every model should be derived from."""
 
-  def compute_predictions(self, theta: NestedMap,
-                          input_batch: NestedMap) -> Predictions:
+  def compute_predictions(self, input_batch: NestedMap) -> Predictions:
     """Computes predictions for `input_batch`.
 
     This method must be defined in a concrete derived class.
@@ -233,7 +238,6 @@ class BaseModel(base_layer.BaseLayer):
     used to compute final outputs, perhaps with sampling.
 
     Args:
-      theta: A `.NestedMap` object containing variable values of this task.
       input_batch: A `.NestedMap` object containing input tensors.
 
     Returns:
@@ -241,15 +245,13 @@ class BaseModel(base_layer.BaseLayer):
     """
     raise NotImplementedError('Abstract method')
 
-  def compute_loss(self, theta: NestedMap, predictions: Union[JTensor,
-                                                              NestedMap],
+  def compute_loss(self, predictions: Union[JTensor, NestedMap],
                    input_batch: NestedMap) -> Tuple[Metrics, Dict[str, Any]]:
     """Computes the loss and other metrics for the given predictions.
 
     This method must be defined in a concrete derived class.
 
     Args:
-      theta: A `.NestedMap` object containing variable values of this task.
       predictions: The output of `compute_predictions`.
       input_batch: A `.NestedMap` object containing input tensors to this tower.
 
@@ -262,13 +264,10 @@ class BaseModel(base_layer.BaseLayer):
     """
     raise NotImplementedError('Abstract method')
 
-  def fprop(self, theta: NestedMap,
-            input_batch: NestedMap) -> Tuple[Metrics, Dict[str, Any]]:
+  def fprop(self, input_batch: NestedMap) -> Tuple[Metrics, Dict[str, Any]]:
     """Forward propagation through one tower of the model.
 
     Args:
-      theta: A `.NestedMap` object containing variable values of this task
-        copied to this tower's devices.
       input_batch: A `.NestedMap` object containing input tensors to this tower.
 
     Returns:
@@ -280,15 +279,14 @@ class BaseModel(base_layer.BaseLayer):
         training example, where the first dimension of each tensor is the batch
         index.
     """
-    predictions = self.compute_predictions(theta, input_batch)
-    return self.compute_loss(theta, predictions, input_batch)
+    with py_utils.AuxLossContext():
+      predictions = self.compute_predictions(input_batch)
+      return self.compute_loss(predictions, input_batch)
 
-  def decode(self, theta: NestedMap,
-             input_batch: NestedMap) -> Tuple[NestedMap, NestedMap]:
-    """Decodes input_batch with model weights 'theta'.
+  def decode(self, input_batch: NestedMap) -> Tuple[NestedMap, NestedMap]:
+    """Decodes input_batch.
 
     Args:
-      theta: A `.NestedMap` object containing variable values of this task.
       input_batch: The input batch. A `NestedMap` of tensors. Or, if input batch
         spiltting is used, a list of `NestedMap`, one for each split.
 
@@ -336,20 +334,18 @@ class ClassificationMLPModel(BaseModel):
     self.create_children('mlp_layers', p.mlp_tpl.Copy())
     self.create_child('softmax', p.softmax_tpl.Copy())
 
-  def compute_predictions(self, theta: NestedMap,
-                          input_batch: NestedMap) -> Predictions:
+  def compute_predictions(self, input_batch: NestedMap) -> Predictions:
 
-    input_emb = self.softmax.emb_lookup(theta.softmax, input_batch.ids)
+    input_emb = self.softmax.emb_lookup(input_batch.ids)
 
-    output = self.mlp_layers.fprop(theta.mlp_layers, input_emb)
+    output = self.mlp_layers.fprop(input_emb)
     predictions = self.softmax.fprop(
-        theta=theta.softmax,
         inputs=output,
         class_weights=input_batch.weights[:, :, jnp.newaxis],
         class_ids=input_batch.ids[:, :, jnp.newaxis])
     return predictions
 
-  def compute_loss(self, theta: NestedMap, predictions: NestedMap,
+  def compute_loss(self, predictions: NestedMap,
                    input_batch: NestedMap) -> Tuple[Metrics, Dict[str, Any]]:
     labels = input_batch.labels
     weights = input_batch.weights
@@ -398,8 +394,7 @@ class LanguageModel(BaseModel):
     lm_p = p.lm.Copy()
     self.create_child('lm', lm_p)
 
-  def compute_predictions(self, theta: NestedMap,
-                          input_batch: NestedMap) -> Predictions:
+  def compute_predictions(self, input_batch: NestedMap) -> Predictions:
     """Computes predictions for `input_batch`."""
     p = self.params
     if 'tgt' in input_batch:
@@ -415,6 +410,7 @@ class LanguageModel(BaseModel):
     else:
       weights = 1.0 - paddings
       weights = weights.astype(self.fprop_dtype)
+      input_batch.weights = weights
 
     inputs = input_batch.ids
     labels = NestedMap(class_ids=input_batch.labels, class_weights=weights)
@@ -426,18 +422,16 @@ class LanguageModel(BaseModel):
     else:
       packed_input_kwargs = {}
     return self.lm.fprop(
-        theta=theta.lm,
         inputs=inputs,
         paddings=paddings,
         labels=labels,
         **packed_input_kwargs)
 
-  def compute_loss(self, theta: NestedMap, predictions: NestedMap,
+  def compute_loss(self, predictions: NestedMap,
                    input_batch: NestedMap) -> Tuple[Metrics, Dict[str, Any]]:
     """Computes the loss and other metrics for the given predictions.
 
     Args:
-      theta: A `.NestedMap` object containing variable values of this task.
       predictions: The output of `compute_predictions`.
       input_batch: A `.NestedMap` object containing input tensors to this tower.
 
@@ -451,12 +445,10 @@ class LanguageModel(BaseModel):
     return _compute_xent_loss_helper(predictions, input_batch,
                                      self.params.return_predictions)
 
-  def decode(self, theta: NestedMap,
-             input_batch: NestedMap) -> Tuple[NestedMap, NestedMap]:
-    """Greedy decodes the input_batch with model weights 'theta'.
+  def decode(self, input_batch: NestedMap) -> Tuple[NestedMap, NestedMap]:
+    """Greedy decodes the input_batch.
 
     Args:
-      theta: A NestedMap of variable values of this task.
       input_batch: The input batch, with fields like `.ids`.
 
     Returns:
@@ -476,15 +468,22 @@ class LanguageModel(BaseModel):
                                         [batch_size], minval, maxval + 1,
                                         input_batch.ids.dtype)
     decoder_state = self.lm.init_states(
-        theta.lm,
         target_batch_size=batch_size,
         target_max_length=p.decoder.seqlen)
 
-    def extend_step_fn(states, ids):
-      new_states, xent = self.lm.extend_step(theta.lm, states, ids)
-      return new_states, xent.logits
+    global_step = base_layer.cur_global_step()
 
-    result = _greedy_decode(
+    lm_theta = self.lm.local_theta()
+    def extend_step_fn(states, ids):
+      with base_layer.JaxContext.new_context(
+          prng_key=base_layer.next_prng_key(),
+          global_step=global_step) as jax_context:
+        jax_context.bind(self.lm, self.lm.vars_to_flax_vars(lm_theta),
+                         [base_layer.SCOPE_AUX_LOSS])
+        new_states, xent = self.lm.extend_step(states, ids)
+        return new_states, xent.logits
+
+    result = greedy_decode(
         extend_step_fn,
         decoder_state,
         input_batch.ids,
@@ -556,6 +555,10 @@ class SequenceModel(BaseModel):
         'eos_id', 2,
         'The id of EOS token indicating the termination of decoding.')
     p.Define('decoder', decoder_p, 'Decoder params.')
+    p.Define(
+        'label_smoothing_prob', 0.0,
+        'If > 0.0, smooth out one-hot prob by spreading this amount of'
+        ' prob mass to all other tokens.')
     return p
 
   def __init__(self, params: InstantiableParams) -> None:
@@ -566,7 +569,7 @@ class SequenceModel(BaseModel):
     model_p = p.model.Copy()
     self.create_child('model', model_p)
 
-  def compute_predictions(self, theta, input_batch):
+  def compute_predictions(self, input_batch):
     """Computes predictions for `input_batch`."""
     p = self.params
     if p.model.packed_input:
@@ -578,10 +581,19 @@ class SequenceModel(BaseModel):
       }
     else:
       packed_input_kwargs = {}
+
     labels = NestedMap(
         class_ids=input_batch.tgt.labels, class_weights=input_batch.tgt.weights)
+    if p.label_smoothing_prob > 0.0:
+      vocab_size = p.model.softmax_tpl.num_classes
+      class_probabilities = jax.nn.one_hot(labels.class_ids, vocab_size)
+      fill_prob = p.label_smoothing_prob / (vocab_size - 1)
+      class_probabilities = (
+          (1.0 - p.label_smoothing_prob) * class_probabilities + fill_prob *
+          (1.0 - class_probabilities)).astype(self.fprop_dtype)
+      labels.class_probabilities = class_probabilities
+
     return self.model.fprop(
-        theta=theta.model,
         inputs=input_batch.src.ids,
         input_paddings=input_batch.src.paddings,
         targets=input_batch.tgt.ids,
@@ -589,11 +601,10 @@ class SequenceModel(BaseModel):
         labels=labels,
         **packed_input_kwargs)
 
-  def compute_loss(self, theta, predictions, input_batch):
+  def compute_loss(self, predictions, input_batch):
     """Computes the loss and other metrics for the given predictions.
 
     Args:
-      theta: A `.NestedMap` object containing variable values of this task.
       predictions: The output of `ComputePredictions`.
       input_batch: A `.NestedMap` object containing input tensors to this tower.
 
@@ -607,12 +618,10 @@ class SequenceModel(BaseModel):
     return _compute_xent_loss_helper(predictions, input_batch.tgt,
                                      self.params.return_predictions)
 
-  def decode(self, theta: NestedMap,
-             input_batch: NestedMap) -> Tuple[NestedMap, NestedMap]:
-    """Decodes input_batch with model weights 'theta'.
+  def decode(self, input_batch: NestedMap) -> Tuple[NestedMap, NestedMap]:
+    """Decodes input_batch.
 
     Args:
-      theta: A NestedMap of variable values of this task.
       input_batch: The input batch, with a field `.src` and `.tgt` corresponding
         to source and target, which itself contains the `.ids` and `.paddings.`
 
@@ -622,22 +631,29 @@ class SequenceModel(BaseModel):
         int ids with the decoded output) as well as the decoded length.
     """
     p = self.params
+    model_theta = self.model.local_theta()
     if p.decoder.seqlen <= 0:
       raise ValueError('Must set p.decoder.seqlen > 0, current value = '
                        f'{p.decoder.seqlen}')
     batch_size = input_batch.tgt.ids.shape[0]
     decoder_state = self.model.init_states(
-        theta.model,
         inputs=input_batch.src.ids,
         input_paddings=input_batch.src.paddings,
         target_batch_size=batch_size,
         target_max_length=p.decoder.seqlen)
 
-    def extend_step_fn(states, ids):
-      new_states, xent = self.model.extend_step(theta.model, states, ids)
-      return new_states, xent.logits
+    global_step = base_layer.cur_global_step()
 
-    result = _greedy_decode(
+    def extend_step_fn(states, ids):
+      with base_layer.JaxContext.new_context(
+          prng_key=base_layer.next_prng_key(),
+          global_step=global_step) as jax_context:
+        jax_context.bind(self.model, self.model.vars_to_flax_vars(model_theta),
+                         [base_layer.SCOPE_AUX_LOSS])
+        new_states, xent = self.model.extend_step(states, ids)
+        return new_states, xent.logits
+
+    result = greedy_decode(
         extend_step_fn,
         decoder_state,
         input_batch.tgt.ids,
@@ -652,8 +668,9 @@ class SequenceModel(BaseModel):
                      jnp.array(batch_size, jnp.float32)))
     return metrics, result
 
-  def process_decode_out(self, input_obj: base_input.BaseInput,
-                         decode_out: NestedMap) -> Sequence[Tuple[str, Any]]:
+  def process_decode_out(
+      self, input_obj: base_input.BaseInput,
+      decode_out: NestedMap) -> Tuple[NestedMap, Sequence[Tuple[str, Any]]]:
     """Processes one batch of decoded outputs.
 
     Args:
@@ -661,10 +678,10 @@ class SequenceModel(BaseModel):
       decode_out: The output from decode(). May have an extra leading axis.
 
     Returns:
-      A dict where each entry corresponds to a row in the batch. The keys should
-      be unique across the entire decode dataset. The returned dict contains
-      the source sequence, the decoded sequence and the gold truth target
-      sequence.
+      - metrics, a NestedMap containing str keys and (metric, weight) pairs for
+        the current batch (a tuple of two scalars).
+      - A list of dict where each entry corresponds to a row in the batch. The
+        keys should be unique across the entire decode dataset.
     """
     decoded_strs = input_obj.ids_to_strings(
         decode_out.output_ids, decode_out.decode_lengths, key='tgt')
@@ -680,8 +697,14 @@ class SequenceModel(BaseModel):
           'source': source_strs[idx],
           'decoded': decoded_str,
           'target': target_strs[idx],
+          'ids': decode_out.output_ids[idx],
+          'logprobs': decode_out.logprobs[idx],
+          'decode_length': decode_out.decode_lengths[idx],
       }))
-    return ret
+    decode_lengths = jnp.average(decode_out.decode_lengths).astype(jnp.float32)
+    metrics = NestedMap(
+        decode_length=(decode_lengths, jnp.array(1.0, jnp.float32)))
+    return metrics, ret
 
 
 class ClassificationModel(BaseModel):
@@ -706,12 +729,10 @@ class ClassificationModel(BaseModel):
     self.create_child('network', p.network)
     self.create_child('softmax', p.softmax)
 
-  def compute_predictions(self, theta: NestedMap,
-                          input_batch: NestedMap) -> Predictions:
+  def compute_predictions(self, input_batch: NestedMap) -> Predictions:
     """Computes predictions for `input_batch`.
 
     Args:
-      theta: A `.NestedMap` object containing variable values of this task.
       input_batch: A `.NestedMap` object containing input tensors to this tower.
 
     Returns:
@@ -720,7 +741,7 @@ class ClassificationModel(BaseModel):
     """
     p = self.params
     inputs = input_batch.Get(p.input_field)
-    features = self.network.fprop(theta.network, inputs)
+    features = self.network.fprop(inputs)
     batch_size = inputs.shape[0]
     example_weights = jnp.ones([batch_size])
     if 'weight' in input_batch:
@@ -731,7 +752,6 @@ class ClassificationModel(BaseModel):
             f'is {example_weights.shape}')
     # Softmax expects weights to be of shape [..., 1].
     softmax_output = self.softmax.fprop(
-        theta=theta.softmax,
         inputs=features,
         class_weights=example_weights[:, jnp.newaxis],
         class_probabilities=input_batch.label_probs)
@@ -740,12 +760,11 @@ class ClassificationModel(BaseModel):
         softmax_output=softmax_output,
         example_weights=example_weights)
 
-  def compute_loss(self, theta: NestedMap, predictions: NestedMap,
+  def compute_loss(self, predictions: NestedMap,
                    input_batch: NestedMap) -> Tuple[Metrics, Dict[str, Any]]:
     """Computes the loss and other metrics for the given predictions.
 
     Args:
-      theta: A `.NestedMap` object containing variable values of this task.
       predictions: The output of `compute_predictions`.
       input_batch: A `.NestedMap` object containing input tensors to this tower.
 
@@ -811,8 +830,7 @@ class BertModel(BaseModel):
     mlm_augment_p.mask_token_id = p.mask_token_id
     self.create_child('mlm_augmenter', mlm_augment_p)
 
-  def compute_predictions(self, theta: NestedMap,
-                          input_batch: NestedMap) -> Predictions:
+  def compute_predictions(self, input_batch: NestedMap) -> Predictions:
     """Computes predictions for `input_batch`."""
     p = self.params
     assert p.lm.packed_input
@@ -827,7 +845,7 @@ class BertModel(BaseModel):
       augmented_pos = input_batch.masked_pos
     else:
       augmented_labels, augmented_pos = self.mlm_augmenter.fprop(
-          theta.mlm_augmenter, labels, paddings)
+          labels, paddings)
 
     if p.label_smoothing_prob > 0.0:
       class_probabilities = jax.nn.one_hot(labels, p.lm.vocab_size)
@@ -844,7 +862,6 @@ class BertModel(BaseModel):
       labels = NestedMap(class_ids=labels, class_weights=augmented_pos)
 
     lm_out = self.lm.fprop(
-        theta=theta.lm,
         inputs=augmented_labels,
         paddings=paddings,
         labels=labels,
@@ -854,12 +871,11 @@ class BertModel(BaseModel):
     lm_out.augmented_pos = augmented_pos
     return lm_out
 
-  def compute_loss(self, theta: NestedMap, predictions: NestedMap,
+  def compute_loss(self, predictions: NestedMap,
                    input_batch: NestedMap) -> Tuple[Metrics, Dict[str, Any]]:
     """Computes the loss and other metrics for the given predictions.
 
     Args:
-      theta: A `.NestedMap` object containing variable values of this task.
       predictions: The output of `compute_predictions`.
       input_batch: A `.NestedMap` object containing input tensors to this tower.
 

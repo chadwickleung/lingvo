@@ -229,6 +229,8 @@ class MoEBuilder(builder.Base):
     p.Define('model_dim_reshape_segments', None,
              'Size of N when reshaping model dimension M to Nm')
     p.Define('use_xla_dynamic_update_slice', True, 'internal optimization')
+    p.Define('decoder_skip_causal_mask', False,
+             'Skip applying the decoder causal mask')
 
     return p
 
@@ -552,6 +554,32 @@ class MoEBuilder(builder.Base):
              self._Dropout('y_dropout', 1 - self.params.dropout_rate)),
             ('x,y_dropout->o.vec', self._Add('add')),
         )
+    if norm_policy == 'primer_hybrid':
+      if conv_kernel_size is not None:
+        if norm_type != 'ln':
+          raise ValueError('Only ln supports conv. %s does not support conv.' %
+                           norm_type)
+        post_norm_layer = self._LNConv('post_ln', conv_kernel_size)
+      elif norm_type == 'ln':
+        post_norm_layer = self._LN('post_ln')
+      elif norm_type == 'true_ln':
+        post_norm_layer = self._TrueLN('post_true_ln')
+      elif norm_type == 'pn':
+        post_norm_layer = self._PN('post_pn')
+      else:
+        raise ValueError('Norm type %s not supported.' % norm_type)
+      return self._Graph(
+          name,
+          ['i'],
+          ['o'],
+          ('i.vec,i.segment_id->input_masked', self.Mask()),
+          ('input_masked->x', norm_layer),
+          (layer_inputs + '->y,o.aux_loss', layer),
+          ('y->y_norm', post_norm_layer),
+          ('y_norm->y_dropout',
+           self._Dropout('y_dropout', 1 - self.params.dropout_rate)),
+          ('input_masked,y_dropout->o.vec', self._Add('add')),
+      )
     raise ValueError('Unsupported norm policy: %s' % norm_policy)
 
   @property
@@ -593,14 +621,15 @@ class MoEBuilder(builder.Base):
                             self._DecoderLayerInMapKeys, _DecoderLayer,
                             start_layer_id, has_final_layer)
 
-  def Repeat(self, name, body, repeat=1, per_layer_vars=True):
+  def Repeat(self, name, body, repeat=1, per_layer_vars=True, start_layer_id=0):
     """Wrapper to call builder_layers.RepeatLayer."""
     return builder_layers.RepeatLayer.Params().Set(
         name=name,
         body=body,
         repeat=repeat,
         per_layer_vars=per_layer_vars,
-        unroll='eval_only')
+        unroll='eval_only',
+        start_layer_id=start_layer_id)
 
   def ShardablePipeline(self, name, body, stages):
     """Wrapper to call gshard_layers.LayerwiseShardablePipelinedLayer."""
@@ -627,11 +656,12 @@ class MoEBuilder(builder.Base):
       stack.append(
           ('i.' + key + '->' + key + '_split', self.Split(key + '_split')))
 
+    loss_start_layer_id = 0 if use_repeat_layer else start_layer_id
     stack += [
-        (imap_keys[0] + '_split->x_%03d' % start_layer_id,
+        (imap_keys[0] + '_split->x_%03d' % loss_start_layer_id,
          self._Dropout('input_dropout', 1 - self.params.dropout_rate)),
-        ('i.aux_loss->loss_%03d' % start_layer_id,
-         self._Identity('loss_%03d' % start_layer_id)),
+        ('i.aux_loss->loss_%03d' % loss_start_layer_id,
+         self._Identity('loss_%03d' % loss_start_layer_id)),
     ]
 
     def _SubLayersBlock(l, idx):
@@ -647,7 +677,6 @@ class MoEBuilder(builder.Base):
               ('loss_%03d,omap_%03d.aux_loss->loss_%03d' % (idx, idx, idx + 1),
                self._Add('loss_%03d' % (idx + 1)))]
 
-    i = start_layer_id
     assert num % spmd_pipeline_stages == 0
     layers_per_stage = num // spmd_pipeline_stages
     main_stack = []
@@ -656,24 +685,28 @@ class MoEBuilder(builder.Base):
     if use_repeat_layer:
       tf.logging.info('Uses repeat layer')
       blocks = []
+      i = 0
       for l in sub_layers:
         blocks += _SubLayersBlock(l, i)
         i += 1
       body_inputs = 'x_%03d,loss_%03d,' % (
-          start_layer_id, start_layer_id) + ','.join(
+          loss_start_layer_id, loss_start_layer_id) + ','.join(
               [key + '_split' for key in imap_keys[1:]])
       body_outputs = 'x_%03d,loss_%03d,' % (i, i) + ','.join(
           [key + '_split' for key in imap_keys[1:]])
       body_p = self._Graph('blocks_body', body_inputs.split(','),
                            body_outputs.split(','), *blocks)
       repeat_p = self.Repeat(
-          name='blocks', body=body_p, repeat=layers_per_stage)
+          name='blocks',
+          body=body_p,
+          repeat=layers_per_stage,
+          start_layer_id=start_layer_id)
       main_stack = [
           (body_inputs + '->' + body_outputs.replace('_split', '_split_out'),
            repeat_p)
       ]
     else:
-      # tf.logging.info('Does not use repeat layer')
+      i = start_layer_id
       for _ in range(layers_per_stage):
         for l in sub_layers:
           # x_i, loss_i => x_{i+1}, loss_{i+1}
@@ -1087,9 +1120,10 @@ class MoEBuilder(builder.Base):
     ret = tf.logical_and(ret, tf.equal(b, 0))
     ret = tf.logical_or(ret, tf.not_equal(a, b))
     # position (~row) is less that memory position(~column)
-    causal = tf.less(
-        tf.expand_dims(segment_pos, -1), tf.expand_dims(segment_pos, -2))
-    ret = tf.math.logical_or(causal, ret)
+    if not self.params.decoder_skip_causal_mask:
+      causal = tf.less(
+          tf.expand_dims(segment_pos, -1), tf.expand_dims(segment_pos, -2))
+      ret = tf.math.logical_or(causal, ret)
     return tf.cast(ret, py_utils.FPropDtype(self.params))
 
   def _DecComputeBiasGraphEdge(self):
@@ -2061,6 +2095,9 @@ class DenseBuilder(MoEBuilder):
     equation should not have 'N', and only use 'M' when it is expected to be
     reshaped.
 
+    For example, an input equation 'GSM,ME->GSE' and model_dim_reshape_segments
+    # [16, 4] will be rewritten into the new equation 'GSNOL,NOLE->GSE'.
+
     Args:
       equation: a string describing the contraction, in the same format as
         numpy.einsum.
@@ -2070,8 +2107,11 @@ class DenseBuilder(MoEBuilder):
     Returns:
       tf.einsum(maybe_modified_equation, x, y)
     """
-    return gshard_layers.EinsumWithModelDim(equation, x, y,
-                                            self._model_dim_reshape_segments)
+    if self._model_dim_reshape_segments is None:
+      return tf.einsum(equation, x, y)
+    new_equation = gshard_layers._EinsumEqWithModelDim(  # pylint: disable=protected-access
+        equation, self._model_dim_reshape_segments)
+    return tf.einsum(new_equation, x, y)
 
   def DepthwiseConvAutoregressive(self, name, kernel_size, model_dims=None):
     model_dims = model_dims or self._ReshapedModelDims()
@@ -3206,7 +3246,7 @@ class UniTransformer(base_model.BaseTask):
              '[ln, pn, true_ln].')
     p.Define(
         'norm_policy', 'pre', 'Policy for applying normalization. '
-        'Options are: [pre, primer].')
+        'Options are: [pre, primer, primer_hybrid].')
     p.Define('multi_dconv_head_att', False,
              "Whether or not to use Primer's Mutli-Dconv-Head attention.")
     # TODO(krikun): add a separate params class for decoder options
@@ -3910,6 +3950,12 @@ class BertTransformer(base_model.BaseTask):
         segment_pos=input_batch.segment_pos,
         masked_pos=masked_pos,
         aux_loss=tf.convert_to_tensor(0.0, py_utils.FPropDtype(self.params)))
+
+    # We use the masked & augmented input ids `emb_ids` here.
+    if p.moe and p.builder.gating_func == 'hashing':
+      expert_id = tf.math.floormod(emb_ids, p.builder.e_dim)
+      nmap.expert_id = expert_id
+
     return nmap
 
   def ComputePredictions(self, theta, input_batch):

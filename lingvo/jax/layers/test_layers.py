@@ -50,14 +50,14 @@ class ProjectionLayer(base_layer.BaseLayer):
     bias_layer_p = linears.Bias.Params().Set(dims=p.output_dims)
     self.create_child('bias', bias_layer_p)
 
-  def fprop(self, theta: NestedMap, inputs: JTensor) -> JTensor:
-    return self.bias.fprop(theta.bias, self.linear.fprop(theta.linear, inputs))
+  def fprop(self, inputs: JTensor) -> JTensor:
+    return self.bias.fprop(self.linear.fprop(inputs))
 
 
 class AddOneLayer(base_layer.BaseLayer):
   """A layers without any variables."""
 
-  def fprop(self, theta: NestedMap, inputs: JTensor) -> JTensor:
+  def fprop(self, inputs: JTensor) -> JTensor:
     return inputs + 1.0
 
 
@@ -86,13 +86,14 @@ class TestLayer(base_layer.BaseLayer):
         base_layer.weight_params(
             shape=[4, 5], init=p.params_init, dtype=p.dtype))
 
-  def fprop(self, theta: NestedMap, inputs: JTensor) -> JTensor:
-    x1 = self.linear.linear01.fprop(theta.linear.linear01, inputs)
-    x2 = self.bias[0].fprop(theta.bias[0], x1)
-    x3 = self.linear.linear02.fprop(theta.linear.linear02, x2)
-    x4 = self.bias[1].fprop(theta.bias[1], x3)
+  def fprop(self, inputs: JTensor) -> JTensor:
+    theta = self.local_theta()
+    x1 = self.linear.linear01.fprop(inputs)
+    x2 = self.bias[0].fprop(x1)
+    x3 = self.linear.linear02.fprop(x2)
+    x4 = self.bias[1].fprop(x3)
     x5 = linears.project_last_dim(x4, theta.final_proj)
-    x6 = self.add_one.fprop(theta.add_one, x5)
+    x6 = self.add_one.fprop(x5)
     return x6
 
 
@@ -123,7 +124,8 @@ class VarUnusedLayer(base_layer.BaseLayer):
             init=p.params_init,
             dtype=p.dtype))
 
-  def fprop(self, theta: NestedMap, inputs: JTensor) -> JTensor:
+  def fprop(self, inputs: JTensor) -> JTensor:
+    theta = self.local_theta()
     out = jnp.einsum('bi,io->bo', inputs, theta.var01)
     loss = jnp.sum(out)
     return loss
@@ -163,11 +165,11 @@ class TestModel01(base_model.BaseModel):
             init=p.params_init,
             dtype=p.dtype))
 
-  def compute_predictions(self, theta: NestedMap, inputs: JTensor) -> JTensor:
-    in_normed = self.bn.fprop(theta.bn, inputs)
-    return jnp.einsum('bi,io->bo', in_normed, theta.var01)
+  def compute_predictions(self, inputs: JTensor) -> JTensor:
+    in_normed = self.bn.fprop(inputs)
+    return jnp.einsum('bi,io->bo', in_normed, self.local_theta().var01)
 
-  def compute_loss(self, theta: NestedMap, predictions: JTensor,
+  def compute_loss(self, predictions: JTensor,
                    inputs: JTensor) -> Tuple[NestedMap, NestedMap]:
     del inputs
     loss = jnp.sum(predictions)
@@ -200,11 +202,10 @@ class TestLinearRegressionModel(base_model.BaseModel):
     params.output_dims = p.output_dims
     self.create_child('linear', params)
 
-  def compute_predictions(self, theta: NestedMap,
-                          input_batch: NestedMap) -> JTensor:
-    return self.linear.fprop(theta.linear, input_batch.inputs)
+  def compute_predictions(self, input_batch: NestedMap) -> JTensor:
+    return self.linear.fprop(input_batch.inputs)
 
-  def compute_loss(self, theta, predictions, input_batch):
+  def compute_loss(self, predictions, input_batch):
     targets = input_batch.targets
     error = predictions - targets
     loss = jnp.mean(jnp.square(error))
@@ -229,11 +230,10 @@ class TestBatchNormalizationModel(base_model.BaseModel):
         name='bn', dim=p.input_dims)
     self.create_child('bn', bn_params)
 
-  def compute_predictions(self, theta: NestedMap,
-                          input_batch: NestedMap) -> JTensor:
-    return self.bn.fprop(theta.bn, input_batch.inputs)
+  def compute_predictions(self, input_batch: NestedMap) -> JTensor:
+    return self.bn.fprop(input_batch.inputs)
 
-  def compute_loss(self, theta: NestedMap, predictions: JTensor,
+  def compute_loss(self, predictions: JTensor,
                    input_batch: NestedMap) -> Tuple[NestedMap, NestedMap]:
     targets = input_batch.targets
     error = predictions - targets
@@ -258,10 +258,10 @@ class TestSpmdModel(base_model.BaseModel):
     p = self.params
     self.create_child('ffwd', p.xformer_ffw)
 
-  def compute_predictions(self, theta: NestedMap, inputs: NestedMap) -> JTensor:
-    return self.ffwd.fprop(theta.ffwd, inputs)
+  def compute_predictions(self, inputs: NestedMap) -> JTensor:
+    return self.ffwd.fprop(inputs)
 
-  def compute_loss(self, theta: NestedMap, predictions: JTensor,
+  def compute_loss(self, predictions: JTensor,
                    input_batch: NestedMap) -> Tuple[NestedMap, NestedMap]:
     loss = jnp.mean(jnp.square(predictions))
     per_example_out = NestedMap(predictions=predictions)

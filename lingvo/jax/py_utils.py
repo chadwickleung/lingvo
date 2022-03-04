@@ -18,13 +18,14 @@
 import dataclasses
 import functools
 from typing import Any
-import zlib
 
 from absl import logging
 import flax
 import jax
 from jax.experimental import global_device_array as gda_lib
 from jax.experimental import maps
+from jax.experimental import multihost_utils
+from jax.experimental import pjit
 import jax.numpy as jnp
 from lingvo.core import cluster
 from lingvo.core import hyperparams
@@ -112,7 +113,15 @@ def extract_keys(n, p, key_separator, left_separator, right_separator):
       right_separator=right_separator)
 
 
-def _handle_dict(node, prefix, key_separator, left_separator, right_separator):
+def _handle_dict(
+    node,
+    prefix,
+    key_separator,
+    left_separator,
+    right_separator,
+    node_type=None,
+):
+  """Handles dictionaries."""
   result = {}
   for key, value in node.items():
     if prefix:
@@ -121,7 +130,10 @@ def _handle_dict(node, prefix, key_separator, left_separator, right_separator):
       path = key
     result[key] = extract_keys(value, path, key_separator, left_separator,
                                right_separator)
-  return type(node)(result)
+  if node_type is not None:
+    return node_type(**result)
+  else:
+    return type(node)(result)
 
 
 def extract_prefixed_keys_from_nested_map(node: Any,
@@ -130,10 +142,12 @@ def extract_prefixed_keys_from_nested_map(node: Any,
                                           left_separator: str = '[',
                                           right_separator: str = ']') -> Any:
   """Extracts a NestedMap with the nested prefix keys from its NestedMap node."""
-
   if isinstance(node, dict):  # NestedMap inherits from dict.
     return _handle_dict(node, prefix, key_separator, left_separator,
                         right_separator)
+  # PartitionSpec is subclass of tuple.
+  elif isinstance(node, pjit.PartitionSpec):
+    return prefix
   elif isinstance(node, (list, tuple)):
     # Check if it is a NamedTuple.
     if hasattr(node, '_fields'):
@@ -151,53 +165,31 @@ def extract_prefixed_keys_from_nested_map(node: Any,
         for i, v in enumerate(node))
   elif (dataclasses.is_dataclass(node) and
         node.__class__ in flax.serialization._STATE_DICT_REGISTRY):  # pylint: disable=protected-access
-    node_dict = flax.serialization.to_state_dict(node)
-    return _handle_dict(node_dict, prefix, key_separator, left_separator,
-                        right_separator)
+    if hasattr(node, '__dict__'):
+      node_dict = node.__dict__
+    else:
+      node_dict = flax.serialization.to_state_dict(node)
+    return _handle_dict(
+        node_dict,
+        prefix,
+        key_separator,
+        left_separator,
+        right_separator,
+        node_type=type(node),
+    )
   if not prefix:
     return None
   return prefix
 
 
-# Use top-level named function to avoid recompilation.
-def _sync_global_devices_f(x):
-  return jax.lax.psum(x, 'i')
-
-
 def sync_global_devices(name: str) -> None:
   """Sync across all hosts/devices."""
-  local_device_count = jax.local_device_count()
   global_device_count = jax.device_count()
-  logging.info('sync_global_devices %s across %s devices globally', name,
-               global_device_count)
-  h = np.int32(zlib.crc32(name.encode()))
-  # Round-down h to multiples of global_device_count.
-  expected = h // global_device_count * global_device_count
-  x = jnp.ones(
-      shape=(local_device_count), dtype=np.int32) * (
-          h // global_device_count)
-  actual = jax.device_get(jax.pmap(_sync_global_devices_f, 'i')(x))
-  if actual[0] != expected:
-    raise ValueError(f'Sync point {name} expected: {expected}; got: {actual}')
+  logging.info('Starting sync_global_devices %s across %s devices globally',
+               name, global_device_count)
+  multihost_utils.sync_global_devices(name)
   logging.info('Finished sync_global_devices %s across %s devices globally',
                name, global_device_count)
-
-
-def _broadcast_scalar_global_devices_f(x: jnp.ndarray) -> jnp.ndarray:
-  return jax.lax.psum(x, 'i')
-
-
-def broadcast_scalar_global_devices(value: Any, dtype=jnp.int32) -> Any:
-  """Broadcasts a scalar from host 0 to all other devices."""
-  if jax.process_index() == 0:
-    inputs = jnp.array(
-        [value] + [0] * (jax.local_device_count() - 1), dtype=dtype)
-  else:
-    inputs = jnp.zeros(shape=[jax.local_device_count()], dtype=dtype)
-  array = jax.device_get(
-      jax.pmap(_broadcast_scalar_global_devices_f, 'i')(inputs))
-  # The elements of `array` are all identical. Retrieve the first one.
-  return array.item(0)
 
 
 def create_gda(host_arrays: np.ndarray, global_shapes: jax.ShapeDtypeStruct,
@@ -243,3 +235,8 @@ def get_global_input_shape_dtype(x: jnp.ndarray) -> jax.ShapeDtypeStruct:
   # Assume fully sharded batch dim.
   x_shape = (x.shape[0] * jax.process_count(),) + x.shape[1:]
   return jax.ShapeDtypeStruct(x_shape, x.dtype)
+
+
+def set_globally_use_rbg_prng_key() -> None:
+  """Must call this before any JAX computation to set RBG PRNGKey globally."""
+  jax.config.update('jax_default_prng_impl', 'rbg')

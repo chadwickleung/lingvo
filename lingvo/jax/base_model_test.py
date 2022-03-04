@@ -18,12 +18,11 @@
 from typing import Any, Tuple
 
 from absl.testing import absltest
-import jax
 from jax import numpy as jnp
-from jax import test_util
 from lingvo.jax import base_layer
 from lingvo.jax import base_model
 from lingvo.jax import py_utils
+from lingvo.jax import test_utils
 import numpy as np
 
 NestedMap = py_utils.NestedMap
@@ -45,24 +44,22 @@ class MockLM(base_layer.BaseLayer):
     super().__init__(p)
     self.logits = jnp.array(p.logits, dtype=jnp.float32)
 
-  def init_states(self, theta: NestedMap, *args: Any,
-                  **kwargs: Any) -> NestedMap:
+  def init_states(self, *args: Any, **kwargs: Any) -> NestedMap:
     return NestedMap(step=0)
 
   def extend_step(
       self,
-      theta: Any,
       states: NestedMap,
       inputs: Any,
   ) -> Tuple[Any, NestedMap]:
-    del theta, inputs
+    del inputs
     ret = NestedMap()
     ret.logits = self.logits.at[states.step].get()
     states.step = states.step + 1
     return states, ret
 
 
-class LanguageModelTest(test_util.JaxTestCase):
+class LanguageModelTest(test_utils.TestCase):
 
   def _run_decode(self, decoder_p, logits, input_batch):
     p = base_model.LanguageModel.Params()
@@ -72,11 +69,9 @@ class LanguageModelTest(test_util.JaxTestCase):
     p.lm.logits = logits
     lang_model = p.Instantiate()
     theta = NestedMap(lm=NestedMap())
-
-    prng_key = jax.random.PRNGKey(seed=1234)
-    with base_layer.JaxContext.new_context(
-        prng_key=prng_key, global_step=jnp.array(0, dtype=jnp.uint32)):
-      _, results = lang_model.decode(theta, input_batch)
+    # We fix seed to 1027 to get the desired prefix lengths below.
+    _, results = test_utils.apply(
+        lang_model, theta, lang_model.decode, input_batch, seed=1027)
     return results
 
   def test_base_case(self):

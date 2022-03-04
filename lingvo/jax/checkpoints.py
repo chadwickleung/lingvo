@@ -26,12 +26,14 @@ from flax import jax_utils
 from flax.training import checkpoints
 import jax
 from jax.experimental import maps
+from jax.experimental import multihost_utils
 from jax.experimental.gda_serialization import serialization as gda_serialization
 # Internal import
 from lingvo.jax import asserts
 from lingvo.jax import checkpoint_pb2
 from lingvo.jax import py_utils
 from lingvo.jax import train_states
+import numpy as np
 import tensorflow.compat.v2 as tf
 
 CHECKPOINT_PREFIX = 'checkpoint_'
@@ -72,7 +74,9 @@ def _make_tmp_checkpoint_dir(checkpoint_dir: str,
                              sync_timestamp: bool = False) -> str:
   timestamp = _to_timestamp(datetime.datetime.utcnow())
   if sync_timestamp:
-    timestamp = py_utils.broadcast_scalar_global_devices(timestamp)
+    timestamp = multihost_utils.broadcast_one_to_all(np.array(timestamp))
+    multihost_utils.assert_equal(timestamp,
+                                 "Timestamps across hosts don't match.")
   tmp_prefix = f'{TMP_PREFIX}{timestamp}'
   return os.path.join(checkpoint_dir,
                       f'{tmp_prefix}.{CHECKPOINT_PREFIX}{step:08d}')
@@ -184,7 +188,7 @@ def latest_checkpoint(checkpoint_dir: str) -> Optional[str]:
 
 
 def restore_checkpoint(
-    train_state: train_states.TrainState,
+    train_state: Optional[train_states.TrainState],
     checkpoint_dir: str,
     global_mesh: Optional[maps.Mesh] = None,
     checkpoint_type: CheckpointType = CheckpointType.CHECKPOINT_FLAX,
@@ -217,7 +221,7 @@ def restore_checkpoint(
     return _restore_checkpoint_gda(train_state, checkpoint_dir, global_mesh,
                                    state_specs, step)
 
-  if train_state.step.ndim != 0:
+  if train_state is not None and train_state.step.ndim != 0:
     raise ValueError('Expecting an unreplicated scalar global step (got '
                      f'`{train_state.step.ndim}`).')
 
@@ -438,7 +442,7 @@ def _save_checkpoint_gda(train_state: train_states.TrainState,
 
 
 def _restore_checkpoint_gda(
-    train_state: train_states.TrainState,
+    train_state: Optional[train_states.TrainState],
     checkpoint_dir: str,
     global_mesh: Optional[maps.Mesh],
     state_specs: Optional[train_states.TrainState],
@@ -446,10 +450,13 @@ def _restore_checkpoint_gda(
   """Restores a checkpoint using JAX GDA deserialization mechanism."""
   if not tf.io.gfile.exists(checkpoint_dir) or not tf.io.gfile.listdir(
       checkpoint_dir):
-    logging.info(
-        'GDA checkpoint restore did not find checkpoint_dir %s; '
-        'Return train_state passed in', checkpoint_dir)
-    return train_state
+    if train_state is not None and step is None:
+      logging.info(
+          'GDA checkpoint restore did not find checkpoint_dir %s; '
+          'Return train_state passed in', checkpoint_dir)
+      return train_state
+    raise FileNotFoundError(
+        f'No checkpoint found for restore in {checkpoint_dir}')
 
   if step is None:
     checkpoint_dirnames = tf.io.gfile.listdir(checkpoint_dir)
@@ -476,10 +483,16 @@ def _restore_checkpoint_gda(
           f'No checkpoint found for restore in {checkpoint_step_dir}')
 
   logging.info('GDA checkpoint restore started...')
-  leaves, treedef = jax.tree_util.tree_flatten(train_state)
-  partition_spec_leaves, _ = jax.tree_util.tree_flatten(state_specs)
+  if train_state is not None:
+    leaves, treedef = jax.tree_util.tree_flatten(train_state)
+    partition_spec_leaves, _ = jax.tree_util.tree_flatten(state_specs)
+    nested_names = _extract_nested_prefix_names(train_state)
+    global_shapes = jax.tree_map(lambda x: x.shape, leaves)
+  else:
+    partition_spec_leaves, treedef = jax.tree_util.tree_flatten(state_specs)
+    nested_names = _extract_nested_prefix_names(state_specs)
+    global_shapes = None
 
-  nested_names = _extract_nested_prefix_names(train_state)
   flattened_nested_names, _ = jax.tree_util.tree_flatten(nested_names)
 
   ckpt_paths = [
@@ -489,7 +502,10 @@ def _restore_checkpoint_gda(
   tspecs = jax.tree_map(gda_serialization.get_tensorstore_spec, ckpt_paths)
 
   train_state_gda = gda_serialization.run_deserialization(
-      [global_mesh] * len(leaves), partition_spec_leaves, tspecs)
+      [global_mesh] * len(tspecs),
+      partition_spec_leaves,
+      tspecs,
+      global_shapes=global_shapes)
 
   restored_train_state = jax.tree_util.tree_unflatten(treedef, train_state_gda)
   # Barrier across all processes to ensure all restore finish.

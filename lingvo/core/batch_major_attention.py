@@ -492,6 +492,19 @@ class MultiHeadedAttention(quant_utils.QuantizableLayer):
         'atten_logit_cap', 0.0, 'Cap the absolute values of logits by '
         'tanh. Enabled when a positive value is specified. May not be '
         'supported by a subclass.')
+    # Memory related params.
+    p.Define('attn_add_memory', False,
+             'Whether to add sketch memory to attention.')
+    p.Define(
+        'memory_tpl', None, 'Template for memory layer, currently only support '
+        'layers.LSHTaskWithMultiplierLayer.Params().')
+    p.Define('attn_log_num_buckets', 6, 'Log of number of buckets.')
+    p.Define('attn_num_hash_fn', 2, 'Number of hash functions.')
+    p.Define('attn_grid_size', 1, 'Grid size.')
+    p.Define('attn_rank', 0, 'Grid size.')
+    p.Define('attn_memory_act', 'RELU', 'Activation function for memory.')
+    p.Define('attn_add_bias', True, 'Whether to add bias.')
+    p.Define('attn_seed', 0, 'Seed for the random hyperplanes.')
     # SPMD partition related params.
     #
     # d - model_dim
@@ -575,6 +588,22 @@ class MultiHeadedAttention(quant_utils.QuantizableLayer):
             use_bias=p.use_bias,
             device_mesh=p.device_mesh,
             weight_split_dims_mapping=post_weight_split_dims_mapping))
+
+    if p.attn_add_memory:
+      assert p.memory_tpl is not None
+      self.CreateChild(
+          'lsh_mem',
+          p.memory_tpl.Copy().Set(
+              input_dim=self.dim_per_head,
+              output_dim=self.dim_per_head,
+              log_num_buckets=p.attn_log_num_buckets,
+              num_hash_fn=p.attn_num_hash_fn,
+              grid_size=p.attn_grid_size,
+              rank=p.attn_rank,
+              memory_act=p.attn_memory_act,
+              add_bias=p.attn_add_bias,
+              seed=p.attn_seed,
+              name='attn_lsh_mem'))
 
   @property
   def dim_per_head(self):
@@ -790,6 +819,15 @@ class MultiHeadedAttention(quant_utils.QuantizableLayer):
                                      p.activation_split_dims_mapping.blnh)
     return encoded, probs
 
+  def _MaybeScaleQuery(self, theta, query):
+    p = self.params
+    if p.enable_query_scale:
+      if p.enable_per_dim_scale:
+        query = self.per_dim_scale.FProp(theta.per_dim_scale, query)
+      else:
+        query *= (p.hidden_dim // p.num_heads)**-0.5
+    return query
+
   def _DotAttenOneStep(self,
                        theta,
                        query,
@@ -823,11 +861,7 @@ class MultiHeadedAttention(quant_utils.QuantizableLayer):
     """
     p = self.params
     # Scale the query projection.
-    if p.enable_query_scale:
-      if p.enable_per_dim_scale:
-        query = self.per_dim_scale.FProp(theta.per_dim_scale, query)
-      else:
-        query *= (p.hidden_dim // p.num_heads)**-0.5
+    query = self._MaybeScaleQuery(theta, query)
 
     key = py_utils.HasRank(key, 4)
 
@@ -921,35 +955,8 @@ class MultiHeadedAttention(quant_utils.QuantizableLayer):
 
     return _ShortSeq() if use_short_seq_opt else _LongSeq()
 
-  def FProp(self,
-            theta,
-            query_vec,
-            key_vec,
-            value_vec,
-            paddings,
-            segment_mask=None,
-            per_step_padding=None):
-    """Computes the value vector given the current query output.
-
-    Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
-      query_vec: [B, T, D].
-      key_vec:   [B, S, D].
-      value_vec: [B, S, D].
-      paddings:  [B, S].
-      segment_mask: [B, 1, T, S]. A mask only applied if packed_input=True.
-      per_step_padding: A mask used by decoder self-attention to prevent
-        information flow from future (causal padding). It has shape [B, T, T] if
-        not None.
-
-    Returns:
-      encoded: [B, T, D].
-      atten_probs: [B, N, T, S].
-
-    Raises:
-      ValueError: If value projection is disabled.
-    """
+  def _HeadsProj(self, theta, query_vec, key_vec, value_vec):
+    """Perform attention heads projections."""
     p = self.params
 
     # Project inputs to key, value and query, respectively has shape
@@ -983,17 +990,63 @@ class MultiHeadedAttention(quant_utils.QuantizableLayer):
     value_proj = gshard_utils.MeshSplit(value_proj, p.device_mesh,
                                         p.activation_split_dims_mapping.blnh)
 
+    return query_proj, key_proj, value_proj
+
+  def _PostProj(self, theta, encoded):
+    """Post-attention projection."""
+    p = self.params
+    # Post projection
+    encoded = self.post.FProp(theta.post, encoded)
+    # Shard the output
+    encoded = gshard_utils.MeshSplit(encoded, p.device_mesh,
+                                     p.activation_split_dims_mapping.bld)
+    return encoded
+
+  def FProp(self,
+            theta,
+            query_vec,
+            key_vec,
+            value_vec,
+            paddings,
+            segment_mask=None,
+            per_step_padding=None):
+    """Computes the value vector given the current query output.
+
+    Args:
+      theta: A `.NestedMap` object containing weights' values of this layer and
+        its children layers.
+      query_vec: [B, T, D].
+      key_vec:   [B, S, D].
+      value_vec: [B, S, D].
+      paddings:  [B, S].
+      segment_mask: [B, 1, T, S]. A mask only applied if packed_input=True.
+      per_step_padding: A mask used by decoder self-attention to prevent
+        information flow from future (causal padding). It has shape [B, T, T] if
+        not None.
+
+    Returns:
+      encoded: [B, T, D].
+      atten_probs: [B, N, T, S].
+
+    Raises:
+      ValueError: If value projection is disabled.
+    """
+    p = self.params
+
+    # Heads projection
+    query_proj, key_proj, value_proj = self._HeadsProj(theta, query_vec,
+                                                       key_vec, value_vec)
+
     if p.packed_input and not self.do_eval:
       assert segment_mask is not None
     encoded, atten_probs = self._DotAtten(theta, query_proj, key_proj,
                                           value_proj, paddings, segment_mask,
                                           per_step_padding)
+    if p.attn_add_memory:
+      encoded += self.lsh_mem.FProp(theta.lsh_mem, encoded - query_proj)
     # Post projection
-    encoded = self.post.FProp(theta.post, encoded)
+    encoded = self._PostProj(theta, encoded)
 
-    # Shard the output
-    encoded = gshard_utils.MeshSplit(encoded, p.device_mesh,
-                                     p.activation_split_dims_mapping.bld)
     return encoded, atten_probs
 
   def InitStates(self, theta, target_batch_size, target_max_length):
@@ -2814,7 +2867,8 @@ class LocalSelfAttentionXL(LocalSelfAttention):
       _, q = py_utils.GetShape(query_vec, 2)
       # Rel pos emb expects the seq length of key is `q.length + left - 1`.
       assert q == p.inference_step_max_length, (
-          'inference_step_max_length must be same to the seq length of query.')
+          f'inference_step_max_length `{p.inference_step_max_length}` '
+          f'must be same to the seq length of query `{q}` ')
     return super().StreamStep(theta, query_vec, query_paddings, key_vec,
                               key_paddings, state0)
 
@@ -3922,6 +3976,9 @@ class TransformerAttentionLayer(base_layer.BaseLayer):
         'such that, residual(x, y) = (x + dropout(y)).')
     p.Define('pre_layer_norm', True, 'Pre or post layer norm.')
     p.Define(
+        'primer_hybrid_norm', False,
+        'Add an additional post layer norm, requires pre_layer_norm=True.')
+    p.Define(
         'add_unnormalized_input', True,
         'If set, uses unnormalized input in the residual add. It is'
         'applicable only if pre_layer_norm is True.')
@@ -4085,9 +4142,18 @@ class TransformerAttentionLayer(base_layer.BaseLayer):
     # Initialize attention layer normalization.
     if p.ln_tpl:
       params = p.ln_tpl.Copy()
-      params.name = 'atten_ln'
       params.input_dim = query_input_dim
-      self.CreateChild('layer_norm', params)
+      if p.primer_hybrid_norm:
+        assert p.pre_layer_norm
+        pre_params = params.Copy()
+        pre_params.name = 'pre_atten_ln'
+        self.CreateChild('pre_layer_norm', pre_params)
+        post_params = params.Copy()
+        post_params.name = 'post_atten_ln'
+        self.CreateChild('post_layer_norm', post_params)
+      else:
+        params.name = 'atten_ln'
+        self.CreateChild('layer_norm', params)
 
     # Initialize residual dropout.
     dropout_tpl = p.dropout_tpl.Copy()
@@ -4136,7 +4202,10 @@ class TransformerAttentionLayer(base_layer.BaseLayer):
 
     # Layer normalization.
     if p.pre_layer_norm and p.ln_tpl:
-      query_vec = self.layer_norm.FProp(theta.layer_norm, query_vec)
+      if p.primer_hybrid_norm:
+        query_vec = self.pre_layer_norm.FProp(theta.pre_layer_norm, query_vec)
+      else:
+        query_vec = self.layer_norm.FProp(theta.layer_norm, query_vec)
       query_vec = self._CastToFPropDtype(query_vec)
 
     # For self-attention: keys = queries.
@@ -4183,6 +4252,9 @@ class TransformerAttentionLayer(base_layer.BaseLayer):
         ctx_vec, atten_probs = _AttenFProp(self.atten, theta.atten)
 
     # Residual connection.
+    if p.primer_hybrid_norm and p.ln_tpl:
+      ctx_vec = self.post_layer_norm.FProp(theta.post_layer_norm, ctx_vec)
+      ctx_vec = self._CastToFPropDtype(ctx_vec)
     ctx_vec = self.residual_dropout.FProp(theta.residual_dropout, ctx_vec)
     input_to_add = (
         unnormalized_query_vec if p.add_unnormalized_input else query_vec)
@@ -4303,7 +4375,10 @@ class TransformerAttentionLayer(base_layer.BaseLayer):
 
     # Layer normalization.
     if p.ln_tpl:
-      query_vec = self.layer_norm.FProp(theta.layer_norm, query_vec)
+      if p.primer_hybrid_norm:
+        query_vec = self.pre_layer_norm.FProp(theta.pre_layer_norm, query_vec)
+      else:
+        query_vec = self.layer_norm.FProp(theta.layer_norm, query_vec)
       query_vec = self._CastToFPropDtype(query_vec)
 
     # Multiheaded masked/causal self-attention.
@@ -4328,6 +4403,9 @@ class TransformerAttentionLayer(base_layer.BaseLayer):
                                                  cached_states)
 
     # Residual connection.
+    if p.primer_hybrid_norm and p.ln_tpl:
+      ctx_vec = self.post_layer_norm.FProp(theta.post_layer_norm, ctx_vec)
+      ctx_vec = self._CastToFPropDtype(ctx_vec)
     ctx_vec = self.residual_dropout.FProp(theta.residual_dropout, ctx_vec)
     input_to_add = (
         unnormalized_query_vec if p.add_unnormalized_input else query_vec)
@@ -4367,12 +4445,18 @@ class TransformerAttentionLayer(base_layer.BaseLayer):
       unnormalized_input_vec = input_vec
 
       if p.ln_tpl:
-        input_vec = self.layer_norm.FProp(theta.layer_norm, input_vec)
+        if p.primer_hybrid_norm:
+          input_vec = self.pre_layer_norm.FProp(theta.pre_layer_norm, input_vec)
+        else:
+          input_vec = self.layer_norm.FProp(theta.layer_norm, input_vec)
         input_vec = self._CastToFPropDtype(input_vec)
 
       output, paddings, atten_state1 = self.atten.StreamStep(
           theta.atten, input_vec, paddings, input_vec, paddings, state0.atten)
 
+      if p.primer_hybrid_norm and p.ln_tpl:
+        output = self.post_layer_norm.FProp(theta.post_layer_norm, output)
+        output = self._CastToFPropDtype(output)
       output = self.residual_dropout.FProp(theta.residual_dropout, output)
 
       # Residual connection.
@@ -6774,7 +6858,7 @@ class Builder(builder.Base):
         activation_fn=lambda x: tf.nn.gelu(x, approximate=True))
 
   def GatedFeedforward(self, name, is_causal=False, ff_hidden_dim=None,
-                       activation_fn=tf.nn.relu):
+                       activation_fn=tf.nn.relu, use_paddings=True):
     del is_causal
     p = self.params
     if ff_hidden_dim is None:
@@ -6795,9 +6879,16 @@ class Builder(builder.Base):
         ('after_gelu->y', self._Dropout('dropout', p.residual_dropout_prob)),
         ('i.vec,y->added',
          self._Add('add', p.ff_residual_weight, p.ff_apply_residual)),
-        ('added,i.paddings->o.vec', self._Pad('pad')),
-        ('i.paddings->o.paddings', self._Id('id')),
     ]
+    if use_paddings:
+      sub_list += [
+          ('added,i.paddings->o.vec', self._Pad('pad')),
+          ('i.paddings->o.paddings', self._Id('id'))
+      ]
+    else:
+      sub_list.append(
+          ('added->o.vec', self._Id('id_vec')),
+      )
 
     if p.packed_input:
       sub_list.append(('i.segment_mask->o.segment_mask',
@@ -6810,7 +6901,7 @@ class Builder(builder.Base):
         *sub_list)
 
   def Feedforward(self, name, is_causal=False, ff_hidden_dim=None,
-                  qdomain=None):
+                  qdomain=None, use_paddings=True):
     del is_causal
     p = self.params
     if ff_hidden_dim is None:
@@ -6851,9 +6942,17 @@ class Builder(builder.Base):
              self._Dropout('dropout', p.residual_dropout_prob))),
         ('i.vec,after_feedforward->added',
          self._Add('add', p.ff_residual_weight, p.ff_apply_residual)),
-        ('added,i.paddings->o.vec', self._Pad('pad')),
-        ('i.paddings->o.paddings', self._Id('id')),
     ]
+
+    if use_paddings:
+      sub_list += [
+          ('added,i.paddings->o.vec', self._Pad('pad')),
+          ('i.paddings->o.paddings', self._Id('id'))
+      ]
+    else:
+      sub_list.append(
+          ('added->o.vec', self._Id('id_vec')),
+      )
 
     if p.packed_input:
       sub_list.append(('i.segment_mask->o.segment_mask',
@@ -7344,6 +7443,266 @@ class PerformerBuilder(Builder):
     if p.deterministic_dropout:
       atten_p.dropout_tpl = layers.DeterministicDropoutLayer.Params()
     return atten_p
+
+
+class MemoryAddLayer(base_layer.BaseLayer):
+  """A layer to add inputs with residual weight."""
+
+  @classmethod
+  def Params(cls):
+    """Params for `MemoryAddLayer`."""
+    p = super().Params()
+    p.Define('add_memory', True, 'If set False, memory is not added.')
+    p.Define('input_dim', 0, 'Input dimension.')
+    p.Define('output_dim', 0, 'Output dimension.')
+    p.Define('log_num_buckets', 6, 'Log of number of buckets.')
+    p.Define('num_hash_fn', 2, 'Number of hash functions.')
+    p.Define('grid_size', 1, 'Grid size.')
+    p.Define('rank', 0, 'Grid size.')
+    p.Define('memory_act', 'RELU', 'Activation function for memory.')
+    p.Define('add_bias', True, 'Whether to add bias.')
+    p.Define('seed', 0, 'Seed for the random hyperplanes.')
+    return p
+
+  def __init__(self, params):
+    super().__init__(params)
+    p = self.params
+
+    if p.add_memory:
+      lsh_params = layers.LSHTaskWithMultiplierLayer.Params().Set(
+          input_dim=p.input_dim,
+          output_dim=p.output_dim,
+          log_num_buckets=p.log_num_buckets,
+          num_hash_fn=p.num_hash_fn,
+          grid_size=p.grid_size,
+          rank=p.rank,
+          memory_act=p.memory_act,
+          add_bias=p.add_bias,
+          seed=p.seed)
+      lsh_params.dtype = p.dtype
+      self.CreateChild('lsh_mem', lsh_params)
+
+  def FProp(self, theta, inputs, outputs):
+    """Return combined inputs.
+
+    Args:
+      theta: weights defined in this layer.
+      inputs: input tensor.
+      outputs: input tensor to add memory to.
+
+    Returns:
+      Added tensors.
+    """
+    p = self.params
+    if p.add_memory:
+      return outputs + self.lsh_mem.FProp(theta.lsh_mem, outputs - inputs)
+    else:
+      return outputs
+
+  @classmethod
+  def FPropMeta(cls, p, x, y):
+    py_utils.CheckShapes((x, y))
+    return py_utils.NestedMap(flops=x.num_elements() * 2, out_shapes=(y,))
+
+
+class SketchMemTransformerBuilder(Builder):
+  """Builder for transformer with sketchmem models.
+
+  GShard mesh splits not supported yet.
+  """
+
+  @classmethod
+  def Params(cls):
+    p = super().Params()
+    p.Define('attn_add_memory', False,
+             'Whether to add sketch memory to attention.')
+    p.Define('ffn_add_memory', False, 'Whether to add sketch memory to FFN.')
+    p.Define('attn_log_num_buckets', 6, 'Log of number of buckets.')
+    p.Define('attn_num_hash_fn', 2, 'Number of hash functions.')
+    p.Define('attn_grid_size', 1, 'Grid size.')
+    p.Define('attn_rank', 0, 'Grid size.')
+    p.Define('attn_memory_act', 'RELU', 'Activation function for memory.')
+    p.Define('attn_add_bias', True, 'Whether to add bias.')
+    p.Define('attn_seed', 0, 'Seed for the random hyperplanes.')
+    p.Define('ffn_log_num_buckets', 6, 'Log of number of buckets.')
+    p.Define('ffn_num_hash_fn', 2, 'Number of hash functions.')
+    p.Define('ffn_grid_size', 1, 'Grid size.')
+    p.Define('ffn_rank', 0, 'Grid size.')
+    p.Define('ffn_memory_act', 'RELU', 'Activation function for memory.')
+    p.Define('ffn_add_bias', True, 'Whether to add bias.')
+    p.Define('ffn_seed', 0, 'Seed for the random hyperplanes.')
+    return p
+
+  def _MemoryAdd(self, name, add_memory=True, input_dim=None, output_dim=None):
+    p = self.params
+    return MemoryAddLayer.Params().Set(
+        name=name,
+        input_dim=input_dim if input_dim is not None else p.model_dim,
+        output_dim=output_dim if output_dim is not None else p.model_dim,
+        add_memory=add_memory,
+        log_num_buckets=p.ffn_log_num_buckets,
+        num_hash_fn=p.ffn_num_hash_fn,
+        grid_size=p.ffn_grid_size,
+        rank=p.ffn_rank,
+        add_bias=p.ffn_add_bias,
+        memory_act=p.ffn_memory_act,
+        seed=p.ffn_seed)
+
+  def _MultiHeadedAtten(self, name, num_heads=None):
+    """Returns a MultiHeadedAttention params."""
+    p = self.params
+    if num_heads is None:
+      num_heads = p.num_heads
+    atten_p = MultiHeadedAttention.Params().Set(
+        name=name,
+        input_dim=p.model_dim,
+        hidden_dim=p.attention_hidden_dim or p.model_dim,
+        num_heads=num_heads,
+        atten_dropout_prob=p.atten_dropout_prob,
+        enable_value_proj=p.selfatten_enable_value_proj,
+        enable_query_scale=p.enable_query_scale,
+        enable_per_dim_scale=p.enable_per_dim_scale,
+        packed_input=p.packed_input,
+        fprop_dtype=p.fprop_dtype,
+        use_bias=p.use_bias,
+        enable_scaling_code_motion=p.enable_scaling_code_motion,
+        device_mesh=p.device_mesh,
+        weight_split_dims_mapping=p.weight_split_dims_mapping.dnh,
+        attn_add_memory=p.attn_add_memory,
+        memory_tpl=layers.LSHTaskWithMultiplierLayer.Params(),
+        attn_log_num_buckets=p.attn_log_num_buckets,
+        attn_num_hash_fn=p.attn_num_hash_fn,
+        attn_grid_size=p.attn_grid_size,
+        attn_rank=p.attn_rank,
+        attn_memory_act=p.attn_memory_act,
+        attn_add_bias=p.attn_add_bias,
+        attn_seed=p.attn_seed)
+    atten_ap = atten_p.activation_split_dims_mapping
+    atten_ap.blnh = p.activation_split_dims_mapping.blnh
+    atten_ap.bld = p.activation_split_dims_mapping.bld
+    if p.deterministic_dropout:
+      atten_p.dropout_tpl = layers.DeterministicDropoutLayer.Params()
+    return atten_p
+
+  def Feedforward(self,
+                  name,
+                  is_causal=False,
+                  ff_hidden_dim=None,
+                  qdomain=None):
+    del is_causal
+    p = self.params
+    if ff_hidden_dim is None:
+      ff_hidden_dim = p.ff_hidden_dim
+    if p.device_mesh is not None:
+      assert p.device_mesh.ndim >= 2
+      assert p.weight_split_dims_mapping.df is not None
+      assert p.weight_split_dims_mapping.fd is not None
+    bias_f_split = ([p.weight_split_dims_mapping.df[1]]
+                    if p.weight_split_dims_mapping.df is not None else None)
+    bias_d_split = ([p.weight_split_dims_mapping.fd[1]]
+                    if p.weight_split_dims_mapping.fd is not None else None)
+    sub_list = [
+        (
+            'i.vec->after_feedforward',
+            self._Seq(
+                'feedforward',
+                self._DefaultLN('ln'),  # LN with default params.
+                self._Linear(
+                    'linear01',
+                    p.model_dim,
+                    ff_hidden_dim,
+                    device_mesh=p.device_mesh,
+                    weight_split_dims_mapping=(p.weight_split_dims_mapping.df),
+                    qdomain=qdomain),
+                self.MeshSplit('split01', p.activation_split_dims_mapping.blf),
+                self._Bias(
+                    'bias01',
+                    ff_hidden_dim,
+                    device_mesh=p.device_mesh,
+                    weight_split_dims_mapping=bias_f_split),
+                self._Activation('act', p.ff_activation_fn),
+                self._Dropout('relu_dropout', p.relu_dropout_prob),
+                self._Linear(
+                    'linear02',
+                    ff_hidden_dim,
+                    p.model_dim,
+                    device_mesh=p.device_mesh,
+                    weight_split_dims_mapping=(p.weight_split_dims_mapping.fd),
+                    qdomain=qdomain),
+                self.MeshSplit('split02', p.activation_split_dims_mapping.bld),
+                self._Bias(
+                    'bias02',
+                    p.model_dim,
+                    device_mesh=p.device_mesh,
+                    weight_split_dims_mapping=bias_d_split),
+                # TODO(wanxin): add memory here for feedforward.
+                # If dropout is zero, we can also apply it after this layer.
+                self._Dropout('dropout', p.residual_dropout_prob))),
+        ('i.vec,after_feedforward->after_memory',
+         self._MemoryAdd('lsh_mem', p.ffn_add_memory)),
+        ('i.vec,after_memory->added',
+         self._Add('add', p.ff_residual_weight, p.ff_apply_residual)),
+        ('added,i.paddings->o.vec', self._Pad('pad')),
+        ('i.paddings->o.paddings', self._Id('id')),
+    ]
+
+    if p.packed_input:
+      sub_list.append(
+          ('i.segment_mask->o.segment_mask', self._Id('segment_mask')))
+
+    return self._Graph(
+        name,
+        ['i'],  # input NestedMap with {vec, paddings, segment_mask}
+        ['o'],  # output NestedMap with {vec, paddings, segment_mask}
+        *sub_list)
+
+  def GatedGeluFeedforward(self, name, is_causal=False, ff_hidden_dim=None):
+    return self.GatedFeedforward(
+        name,
+        is_causal,
+        ff_hidden_dim,
+        activation_fn=lambda x: tf.nn.gelu(x, approximate=True))
+
+  def GatedFeedforward(self,
+                       name,
+                       is_causal=False,
+                       ff_hidden_dim=None,
+                       activation_fn=tf.nn.relu):
+    del is_causal
+    p = self.params
+    if ff_hidden_dim is None:
+      ff_hidden_dim = p.ff_hidden_dim
+
+    def GatedFn(x, y):
+      return tf.math.multiply(activation_fn(x), y)
+
+    sub_list = [
+        ('i.vec->after_gelu',
+         self._Graph(
+             'feedforward', ['x'], ['y'], ('x->x1', self._DefaultLN('ln')),
+             ('x1->h0', self._Linear('wi0', p.model_dim, ff_hidden_dim)),
+             ('x1->h1', self._Linear('wi1', p.model_dim, ff_hidden_dim)),
+             ('h0,h1->h', self._Fn('gelu', fn=GatedFn, fn_out=lambda x, y: x)),
+             ('h->h_dropout', self._Dropout('dropout', p.relu_dropout_prob)),
+             ('h_dropout->y', self._Linear('wo', ff_hidden_dim, p.model_dim)))),
+        ('i.vec,after_gelu->after_memory',
+         self._MemoryAdd('lsh_mem', p.ffn_add_memory)),
+        ('after_memory->y', self._Dropout('dropout', p.residual_dropout_prob)),
+        ('i.vec,y->added',
+         self._Add('add', p.ff_residual_weight, p.ff_apply_residual)),
+        ('added,i.paddings->o.vec', self._Pad('pad')),
+        ('i.paddings->o.paddings', self._Id('id')),
+    ]
+
+    if p.packed_input:
+      sub_list.append(
+          ('i.segment_mask->o.segment_mask', self._Id('segment_mask')))
+
+    return self._Graph(
+        name,
+        ['i'],  # input NestedMap with {vec, paddings, segment_mask}
+        ['o'],  # output NestedMap with {vec, paddings, segment_mask}
+        *sub_list)
 
 
 class LmBuilder(Builder):

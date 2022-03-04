@@ -443,6 +443,16 @@ class InputBenchmark(BaseProgram):
 class TrainProgram(BaseProgram):
   """TrainProgram trains a single task and handles checkpoints."""
 
+  @classmethod
+  def Params(cls):
+    p = super().Params()
+    p.Define(
+        'summary_interval_steps', None,
+        'By default, we write summaries after each program execution. '
+        'If this param is set, we write roughly every '
+        '`summary_interval_steps`.')
+    return p
+
   def __init__(self, params, **kwargs):
     tf.logging.info('###########################################')
     tf.logging.info('Instantiating TrainProgram')
@@ -450,6 +460,8 @@ class TrainProgram(BaseProgram):
     self._step_rate_tracker = summary_utils.StepRateTracker()
     self._program_name = 'TrainProgram'
     p = self.params
+    self._summary_interval_steps = p.summary_interval_steps
+    self._next_summary_step = None
     if (p.ml_perf is not None and p.ml_perf.benchmark_name is not None and
         p.ml_perf.steps_per_epoch is not None):
       self._ml_perf = p.ml_perf
@@ -561,9 +573,9 @@ class TrainProgram(BaseProgram):
           summed_metrics.append(x + y)
       return summed_metrics + [self._task.train_op]
 
-  def InfeedFunc(self):
-    """Infeed function. Only needed in TF2."""
-    self._task.input.DeviceLoopSetupInTF2()
+  def InfeedTFFunc(self):
+    """Infeed function. Only needed in tf.function."""
+    self._task.input.DeviceLoopSetupEager()
 
     def InfeedBody(i):
       self._task.input.CreateTpuEnqueueOps()
@@ -597,8 +609,10 @@ class TrainProgram(BaseProgram):
     # Confirmed: _task is what returned by Task()
     tf.logging.info('Done initiailizing model')
     self._task = self._model.GetTask()
-    tf.logging.info(self._task)
-    self._task.input.TpuSetup()
+    # In Graph mode `InfeedSetupGraph` is called once to build the infeed ops.
+    # In tf.function the relevant methods will be called in `InfeedTFFunc`.
+    if not py_utils.IsEagerMode():
+      self._task.input.InfeedSetupGraph()
 
     @tpu_function.on_device_training_loop
     def TpuTrainLoop():
@@ -641,10 +655,11 @@ class TrainProgram(BaseProgram):
       return _ConstructPostTrainingLoop(metric_values, outfeed)
 
     if py_utils.IsEagerMode():
-      self.infeed_fn = tf.function(autograph=False)(
-          self.InfeedFunc).get_concrete_function()
-      self.tpu_outs = (
-          tf.function(autograph=False)(TrainFunc).get_concrete_function())
+      with self._summary_writer.as_default():
+        self.infeed_fn = tf.function(autograph=False)(
+            self.InfeedTFFunc).get_concrete_function()
+        self.tpu_outs = (
+            tf.function(autograph=False)(TrainFunc).get_concrete_function())
     else:
       self.tpu_outs = TrainFunc()
 
@@ -658,6 +673,17 @@ class TrainProgram(BaseProgram):
         f.write(self._model_analysis)
     except tf.errors.NotFoundError as e:
       tf.logging.info('Failed to write model analysis %s', e)
+
+  def _ShouldWriteSummary(self, global_step):
+    if not self._summary_interval_steps:
+      return True
+    if not self._next_summary_step:
+      self._next_summary_step = global_step
+    if global_step >= self._next_summary_step:
+      self._next_summary_step = global_step + self._summary_interval_steps
+      return True
+    else:
+      return False
 
   def Run(self, sess=None):
     # Prevent overtraining.
@@ -724,42 +750,35 @@ class TrainProgram(BaseProgram):
       global_step = self._model.global_step.numpy()
     else:
       global_step = sess.run(self._model.global_step)
-      # global_step = sess.run(self._model.global_step, options=run_options, run_metadata=run_metadata)
-      # tl_model_global_step = timeline.Timeline(run_metadata.step_stats)
-      # ctf_model_global_step = tl_model_global_step.generate_chrome_trace_format()
-      # with open('/tmp/lingvo/timeline_model_global_step.json', 'w') as f:
-      #   f.write(ctf_model_global_step)
-    step_rate, example_rate, total_examples = (
-        self._step_rate_tracker.ComputeStepRate(
-            global_step,
-            eval_metrics['num_samples_in_batch'][0] * self._steps_per_loop))
-    self._SummarizeValue(global_step, 'global_step/sec', step_rate)
-    self._SummarizeValue(global_step, 'examples/sec', example_rate)
-    self._SummarizeValue(global_step, 'total_samples', total_examples)
-    self._SummarizeValue(global_step, 'total_num_params',
-                         self._total_num_params)
-    status_strs = []
-    for key, (val, _) in sorted(eval_metrics.items()):
-      self._SummarizeValue(global_step, key, val)
-      tf.logging.info((global_step, key, val))
-      status_strs.append('%s=%s' % (key, val))
-    self.SetStatusMessage('Executing train program at step %d %s' %
-                          (global_step, ','.join(status_strs)))
 
-    if py_utils.IsEagerMode():
-      task_global_step = self._task.global_step.numpy()
-      # TODO(laigd): ProcessFPropResults doesn't work yet.
-    else:
-      task_global_step = sess.run(self._task.global_step)
-      # task_global_step = sess.run(self._task.global_step, options=run_options, run_metadata=run_metadata)
-      # tl_task_global_step_1 = timeline.Timeline(run_metadata.step_stats)
-      # ctf_task_global_step_1 = tl_task_global_step_1.generate_chrome_trace_format()
-      # with open('/tmp/lingvo/timeline_task_global_step_1.json', 'w') as f:
-      #   f.write(ctf_task_global_step_1)
-      summaries = self._task.ProcessFPropResults(sess, task_global_step,
-                                                 eval_metrics, outfeeds)
-      self._WriteSummaries(
-          os.path.basename(self._program_dir), global_step, summaries)
+    if self._ShouldWriteSummary(global_step):
+      step_rate, example_rate, total_examples = (
+          self._step_rate_tracker.ComputeStepRate(
+              global_step,
+              eval_metrics['num_samples_in_batch'][0] * self._steps_per_loop))
+      self._SummarizeValue(global_step, 'global_step/sec', step_rate)
+      self._SummarizeValue(global_step, 'examples/sec', example_rate)
+      self._SummarizeValue(global_step, 'total_samples', total_examples)
+      self._SummarizeValue(global_step, 'total_num_params',
+                           self._total_num_params)
+      status_strs = []
+      for key, (val, _) in sorted(eval_metrics.items()):
+        self._SummarizeValue(global_step, key, val)
+        tf.logging.info((global_step, key, val))
+        status_strs.append('%s=%s' % (key, val))
+      self.SetStatusMessage('Executing train program at step %d %s' %
+                            (global_step, ','.join(status_strs)))
+
+      if py_utils.IsEagerMode():
+        task_global_step = self._task.global_step.numpy()
+        # TODO(laigd): ProcessFPropResults doesn't work yet.
+      else:
+        task_global_step = sess.run(self._task.global_step)
+        summaries = self._task.ProcessFPropResults(sess, task_global_step,
+                                                   eval_metrics, outfeeds)
+        self._WriteSummaries(
+            os.path.basename(self._program_dir), global_step, summaries)
+      self._summary_writer.flush()
 
     if self._ml_perf:
       mlp_log.mlperf_print(
@@ -815,9 +834,9 @@ class EvalProgram(BaseProgram):
         summed_metrics.append(x + y)
       return summed_metrics
 
-  def InfeedFunc(self):
-    """Infeed function. Only needed in TF2."""
-    self._task.input.DeviceLoopSetupInTF2()
+  def InfeedTFFunc(self):
+    """Infeed function. Only needed in tf.function."""
+    self._task.input.DeviceLoopSetupEager()
 
     def InfeedBody(i):
       self._task.input.CreateTpuEnqueueOps()
@@ -863,13 +882,18 @@ class EvalProgram(BaseProgram):
       with py_utils.OpportunisticVariableReuseScope(True):
         self._model = self._InstantiateTaskModel(self._task_params)
       self._task = self._model.GetTask()
-      self._task.input.TpuSetup()
+      # In Graph mode `InfeedSetupGraph` is called once to build the infeed ops.
+      # In tf.function the relevant methods will be called in `InfeedTFFunc`.
+      if not py_utils.IsEagerMode():
+        self._task.input.InfeedSetupGraph()
 
       if py_utils.IsEagerMode():
-        self.infeed_fn = tf.function(autograph=False)(
-            self.InfeedFunc).get_concrete_function()
-        self.tpu_outs = (
-            tf.function(autograph=False)(self.EvalFunc).get_concrete_function())
+        with self._summary_writer.as_default():
+          self.infeed_fn = tf.function(autograph=False)(
+              self.InfeedTFFunc).get_concrete_function()
+          self.tpu_outs = (
+              tf.function(autograph=False)(
+                  self.EvalFunc).get_concrete_function())
       else:
         self.tpu_outs = self.EvalFunc()
 
@@ -889,10 +913,11 @@ class EvalProgram(BaseProgram):
       tf.logging.info('Resetting input_generator.')
       self._task.input.Reset(sess)
       if py_utils.IsEagerMode():
-        # In eager mode, after resetting the input generator, we need to
-        # re-trace the infeed tf.function to ensure it uses the new iterator.
-        self.infeed_fn = tf.function(autograph=False)(
-            self.InfeedFunc).get_concrete_function()
+        with self._summary_writer.as_default():
+          # In eager mode, after resetting the input generator, we need to
+          # re-trace the infeed tf.function to ensure it uses the new iterator.
+          self.infeed_fn = tf.function(autograph=False)(
+              self.InfeedTFFunc).get_concrete_function()
 
     if py_utils.IsEagerMode():
       async_executor = executor.new_executor(enable_async=True)
@@ -1030,9 +1055,9 @@ class DecodeProgram(BaseProgram):
     self._program_name = 'DecodeProgram'
     self._decode_out_dict_lst = []
 
-  def InfeedFunc(self):
-    """Infeed function. Only needed in TF2."""
-    self._task.input.DeviceLoopSetupInTF2()
+  def InfeedTFFunc(self):
+    """Infeed function. Only needed in tf.function."""
+    self._task.input.DeviceLoopSetupEager()
     self._task.input.CreateTpuEnqueueOps()
     # `CreateTpuEnqueueOps` and `CreateCpuPassthroughEnqueueOps` must be in the
     # same place, because the former enqueues `_per_host_passthrough_batches`,
@@ -1110,16 +1135,18 @@ class DecodeProgram(BaseProgram):
       with py_utils.OpportunisticVariableReuseScope(True):
         self._model = self._InstantiateTaskModel(self._task_params)
       self._task = self._model.GetTask()
-      # We likely still need to initialize them, otherwise there is no way to
-      # know the tensor_spec of the iterators for capturing
-      self._task.input.TpuSetup(cpu_passthrough=True)
+      # In Graph mode `InfeedSetupGraph` is called once to build the infeed ops.
+      # In tf.function the relevant methods will be called in `InfeedTFFunc`.
+      if not py_utils.IsEagerMode():
+        self._task.input.InfeedSetupGraph(cpu_passthrough=True)
 
       if py_utils.IsEagerMode():
-        self.infeed_fn = tf.function(autograph=False)(
-            self.InfeedFunc).get_concrete_function()
-        self.tpu_outs = (
-            tf.function(autograph=False)(
-                self.DecodeFunc).get_concrete_function())
+        with self._summary_writer.as_default():
+          self.infeed_fn = tf.function(autograph=False)(
+              self.InfeedTFFunc).get_concrete_function()
+          self.tpu_outs = (
+              tf.function(autograph=False)(
+                  self.DecodeFunc).get_concrete_function())
       else:
         self.tpu_outs = self.DecodeFunc()
 
@@ -1258,10 +1285,11 @@ class DecodeProgram(BaseProgram):
       tf.logging.info('Resetting input_generator.')
       self._task.input.Reset(sess)
       if py_utils.IsEagerMode():
-        # In eager mode, after resetting the input generator, we need to
-        # re-trace the infeed tf.function to ensure it uses the new iterator.
-        self.infeed_fn = tf.function(autograph=False)(
-            self.InfeedFunc).get_concrete_function()
+        with self._summary_writer.as_default():
+          # In eager mode, after resetting the input generator, we need to
+          # re-trace the infeed tf.function to ensure it uses the new iterator.
+          self.infeed_fn = tf.function(autograph=False)(
+              self.InfeedTFFunc).get_concrete_function()
 
     # The infeed_step_queue synchronizes the _InfeedLoop with the Decoding loop
     # (that runs _DecodeStep). As an input batch is successfully fed through
@@ -1398,7 +1426,10 @@ class ExperimentalDecodeProgram(DecodeProgram):
       with py_utils.OpportunisticVariableReuseScope(True):
         self._model = self._InstantiateTaskModel(self._task_params)
       self._task = self._model.GetTask()
-      self._task.input.TpuSetup(cpu_passthrough=True)
+      # In Graph mode `InfeedSetupGraph` is called once to build the infeed ops.
+      # In tf.function the relevant methods will be called in `InfeedTFFunc`.
+      if not py_utils.IsEagerMode():
+        self._task.input.InfeedSetupGraph(cpu_passthrough=True)
 
       self.tpu_outs = self.DecodeFunc()
 
@@ -1527,7 +1558,7 @@ class MLPerfTrainDecodeProgram(BaseProgram):
       self._train_model = self._train_task_params.Instantiate(
           executor_ema=self._ema)
     self._train_task = self._train_model.GetTask()
-    self._train_task.input.TpuSetup()
+    self._train_task.input.InfeedSetupGraph()
     self._model = self._train_model
     self._task = self._model.GetTask()
 
@@ -1556,7 +1587,7 @@ class MLPerfTrainDecodeProgram(BaseProgram):
     with py_utils.OpportunisticVariableReuseScope(True):
       self._decode_model = self._InstantiateTaskModel(self._decode_task_params)
     self._decode_task = self._decode_model.GetTask()
-    self._decode_task.input.TpuSetup(cpu_passthrough=True)
+    self._decode_task.input.InfeedSetupGraph(cpu_passthrough=True)
 
     def _DecodeFn():
       """Decode call to be compiled for TPU."""
@@ -1868,7 +1899,8 @@ def SimpleProgramScheduleForTask(train_dataset_name,
                                  async_postprocess=True,
                                  decode_until_out_of_range=False,
                                  postprocess_all_at_once=False,
-                                 emails=None):
+                                 emails=None,
+                                 train_summary_interval_steps=None):
   """Convenient helper method for common case.
 
   Args:
@@ -1907,6 +1939,8 @@ def SimpleProgramScheduleForTask(train_dataset_name,
       single value or a list of values corresponding to the entries in
       eval_dataset_names.
     emails: list. List of emails to email decode/scoring summaries.
+    train_summary_interval_steps: Number of steps to wait before flushing
+      summaries to disk.
 
   Returns:
     A populated SimpleProgramSchedule.Params()
@@ -1919,6 +1953,8 @@ def SimpleProgramScheduleForTask(train_dataset_name,
   # train_program_cls == TrainProgram class
   program_schedule_params.train_program = _CreateProgramParams(
       train_program_cls, 'train', train_dataset_name, train_steps_per_loop)
+  if train_program_cls == TrainProgram:
+    program_schedule_params.train_program.summary_interval_steps = train_summary_interval_steps
 
   program_schedule_params.dataset_names = []
 

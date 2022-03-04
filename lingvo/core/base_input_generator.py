@@ -48,6 +48,8 @@ from lingvo.core import py_utils
 from lingvo.core import tokenizers
 from lingvo.core import tpu_embedding_layers
 
+import numpy as np
+
 # pylint: disable=g-direct-tensorflow-import
 from tensorflow.python.ops import io_ops
 from tensorflow.python.tpu import tpu_embedding as tpu_embedding_lib
@@ -338,7 +340,6 @@ class BaseInputGenerator(base_layer.BaseLayer):
 
   def CreateTpuEnqueueOps(self,
                           job_name=None,
-                          skip_enqueue=False,
                           benchmark_only=False):
     """Create the host-side enqueue ops.
 
@@ -346,8 +347,6 @@ class BaseInputGenerator(base_layer.BaseLayer):
 
     Args:
       job_name: the name of the job on which the enqueue operations run.
-      skip_enqueue: if True, only create the tpu queues, but skip the enqueue
-        call. To be used in eager mode to setup tpu queues.
       benchmark_only: If true, don't wire it up to the TPU infeed.
     """
     if not py_utils.IsEagerMode():
@@ -514,41 +513,40 @@ class BaseInputGenerator(base_layer.BaseLayer):
           q.set_number_of_shards(shards)
 
         self._tpu_queues.append(q)
+        if p.use_partitioned_infeed_queue:
+          assert len(batch) == 1
+          input_ops = q.generate_enqueue_ops([batch[0].Flatten()])
+        elif p.use_per_host_infeed:
 
-        if not skip_enqueue:
-          if p.use_partitioned_infeed_queue:
-            assert len(batch) == 1
-            input_ops = q.generate_enqueue_ops([batch[0].Flatten()])
-          elif p.use_per_host_infeed:
-            def HostPlacementFunction(host_device, x):
-              del x  # Unused.
-              return host_device
+          def HostPlacementFunction(host_device, x):
+            del x  # Unused.
+            return host_device
 
-            if len(batch) > 1:
-              # In this case, the `shard_index_in_host` argument of
-              # `_PerHostInfeedTPUOrdinalFunction` is the index of a sharded
-              # batch in the `batch` list.
-              input_ops = q.generate_enqueue_ops(
-                  [b.Flatten() for b in batch],
-                  placement_function=functools.partial(HostPlacementFunction,
-                                                       host_device),
-                  tpu_ordinal_function=functools.partial(
-                      _PerHostInfeedTPUOrdinalFunction, p.use_per_core_infeed,
-                      task_id))
-            else:
-              input_ops = q.split_inputs_and_generate_enqueue_ops(
-                  batch[0].Flatten(),
-                  placement_function=functools.partial(HostPlacementFunction,
-                                                       host_device),
-                  tpu_ordinal_function=functools.partial(
-                      _PerHostInfeedTPUOrdinalFunction, p.use_per_core_infeed,
-                      task_id))
+          if len(batch) > 1:
+            # In this case, the `shard_index_in_host` argument of
+            # `_PerHostInfeedTPUOrdinalFunction` is the index of a sharded
+            # batch in the `batch` list.
+            input_ops = q.generate_enqueue_ops(
+                [b.Flatten() for b in batch],
+                placement_function=functools.partial(HostPlacementFunction,
+                                                     host_device),
+                tpu_ordinal_function=functools.partial(
+                    _PerHostInfeedTPUOrdinalFunction, p.use_per_core_infeed,
+                    task_id))
           else:
-            assert len(batch) == 1
             input_ops = q.split_inputs_and_generate_enqueue_ops(
                 batch[0].Flatten(),
-                device_assignment=py_utils.GetTpuDeviceAssignment(job_name))
-          input_ops_list += input_ops
+                placement_function=functools.partial(HostPlacementFunction,
+                                                     host_device),
+                tpu_ordinal_function=functools.partial(
+                    _PerHostInfeedTPUOrdinalFunction, p.use_per_core_infeed,
+                    task_id))
+        else:
+          assert len(batch) == 1
+          input_ops = q.split_inputs_and_generate_enqueue_ops(
+              batch[0].Flatten(),
+              device_assignment=py_utils.GetTpuDeviceAssignment(job_name))
+        input_ops_list += input_ops
 
     if benchmark_only:
       grouped_infeed_op = tf.group(*self._per_host_batches)
@@ -721,27 +719,19 @@ class BaseInputGenerator(base_layer.BaseLayer):
               embedding_indices, sample_indices)
     return enqueue_data
 
-  def TpuSetup(self, cpu_passthrough=False):
-    """Set up the input pipeline for TPU."""
+  def InfeedSetupGraph(self, cpu_passthrough=False):
+    """Set up the input pipeline for TPU in Graph mode."""
     if py_utils.IsEagerMode():
-      # In eager mode, we run CreateTpuEnqueueOps once at the start to
-      # initialize the datasets and iterators before `tf.function` because
-      # `tf.function` does not trace python side effects.
-      # https://www.tensorflow.org/guide/function#executing_python_side_effects
-      self.CreateTpuEnqueueOps(skip_enqueue=True)
-      if cpu_passthrough:
-        self.CreateCpuPassthroughEnqueueOps(skip_enqueue=True)
-    else:
-      # In graph mode, the calls create ops but don't execute them.
-      self.CreateTpuEnqueueOps()
-      if cpu_passthrough:
-        self.CreateCpuPassthroughEnqueueOps()
-      self.CreateTpuEmbeddingEnqueueOps()
+      raise RuntimeError('The method should not be called in eager mode.')
+    self.CreateTpuEnqueueOps()
+    if cpu_passthrough:
+      self.CreateCpuPassthroughEnqueueOps()
+    self.CreateTpuEmbeddingEnqueueOps()
 
-  def DeviceLoopSetupInTF2(self):
+  def DeviceLoopSetupEager(self):
     """Set up device-loop-level params."""
     assert py_utils.IsEagerMode(
-    ), 'This function can only be called in TF2 mode.'
+    ), 'This function should only be called in pure Eager/tf.function.'
 
   def PreprocessTpuEmbeddingInputBatch(self, input_batch):
     """Hook to manipulate the TPU embedding input batch.
@@ -777,7 +767,7 @@ class BaseInputGenerator(base_layer.BaseLayer):
     """
     return self.params.cpu_passthrough_keys
 
-  def CreateCpuPassthroughEnqueueOps(self, skip_enqueue=False):
+  def CreateCpuPassthroughEnqueueOps(self):
     """Creates enqueue ops to pass through CPU inputs to the output."""
     p = self.params
     num_tpu_hosts = self.cluster.num_tpu_hosts
@@ -809,8 +799,7 @@ class BaseInputGenerator(base_layer.BaseLayer):
         # blocking further enqueues.
         host_queue = tf.queue.FIFOQueue(capacity=10000, dtypes=cpu_dtypes)
         self._host_queues[task_id] = host_queue
-        if not skip_enqueue:
-          enqueue_ops += [host_queue.enqueue(py_utils.Flatten(batch))]
+        enqueue_ops += [host_queue.enqueue(py_utils.Flatten(batch))]
 
     if p.tpu_infeed_parallelism > 1:
       raise ValueError(
@@ -921,6 +910,95 @@ class BaseInputGenerator(base_layer.BaseLayer):
     }
 
 
+def MaybeOffsetDataSourceId(ds, p, offset):
+  """Helper to add DataSource source_id offset if configured in p."""
+  # This is essentially a bug fix, but we only enable it based on this
+  #  param to maintain backward compatibility.
+  if not p.all_zero_source_id_without_within_batch_mixing:
+    # SimpleDataSource will output source_id=0. We use source_id_offset
+    # to correct this.
+    ds.Set(source_id_offset=offset)
+
+
+def PartitionFilePatternsIntoDataSources(p):
+  """Helper to execute batch_mixing_partition_boundaries.
+
+  Refer to param documentation for details.
+
+  Args:
+    p: params
+
+  Returns:
+    datasources: list of Configured SimpleDataSource objects per partition.
+    weights: sum of file_pattern weights per partition.
+  """
+  # Verifying configuration params
+  if max(list(map(len, p.file_pattern))) >= 3:
+    raise ValueError(
+        'Cannot use batch_mixing_partition_starts with backprop filters. I.e. '
+        f'file_pattern cannot have triplets: {p.file_pattern}')
+
+  prev_ps = 0
+  for ps in p.batch_mixing_partition_boundaries:
+    if ps <= prev_ps:
+      raise ValueError(
+          'batch_mixing_partition_boundaries must be an increasing series '
+          f'greater than 1. Values were: {p.batch_mixing_partition_boundaries}')
+
+    prev_ps = ps
+
+  if p.batch_mixing_partition_boundaries[-1] >= len(p.file_pattern):
+    raise ValueError('batch_mixing_partition_boundaries cannot have boundary '
+                     '>= length of file_patterns. Values were: '
+                     f'{p.batch_mixing_partition_boundaries} and '
+                     f'{len(p.file_pattern)}')
+
+  # Adding a trailing value to simplify logic.
+  partition_boundaries = list(p.batch_mixing_partition_boundaries)
+  partition_boundaries.append(len(p.file_pattern))
+
+  datasources = list()
+  weights = list()
+
+  # Go through file_pattern's and partition according to boundaries.
+  curr_partition_start = 0
+  next_partition_idx = 0
+  partition_file_patterns = list()
+  partition_weights = list()
+  for source_id, input_entry in enumerate(p.file_pattern):
+    # If we have finished this partition and should move to the next
+    if source_id >= partition_boundaries[next_partition_idx]:
+      # Make the new datasource
+      partition_ds = datasource.SimpleDataSource.Params().Set(
+          file_pattern=partition_file_patterns, weights=partition_weights)
+      MaybeOffsetDataSourceId(partition_ds, p, curr_partition_start)
+
+      # Store datasource and corresponding total weight
+      datasources.append(partition_ds)
+      weights.append(np.sum(partition_weights))
+
+      # Clear buffers for use with next datasource
+      partition_file_patterns = list()
+      partition_weights = list()
+
+      # Set up offset and end boundary idx for next datasource
+      curr_partition_start = source_id
+      next_partition_idx += 1
+
+    partition_file_patterns.append(input_entry[0])
+    partition_weights.append(input_entry[1])
+
+  # Set up datasource for final partition.
+  partition_ds = datasource.SimpleDataSource.Params().Set(
+      file_pattern=partition_file_patterns, weights=partition_weights)
+  MaybeOffsetDataSourceId(partition_ds, p, curr_partition_start)
+
+  datasources.append(partition_ds)
+  weights.append(np.sum(partition_weights))
+
+  return datasources, weights
+
+
 def FilePatternToDataSource(p):
   """Helper to turn p.file_pattern (deprecated) into p.file_datasource."""
   if isinstance(p.file_pattern, str):
@@ -946,31 +1024,37 @@ def FilePatternToDataSource(p):
           file_pattern=file_patterns, weights=weights)
     else:
       # Otherwise fall back to MixByWeight-based approach.
-      datasources = []
-      weights = []
-      bprop_variable_filters = []
-      for source_id, input_entry in enumerate(p.file_pattern):
+      for input_entry in p.file_pattern:
         if isinstance(input_entry, str):
           raise ValueError('Should explicitly specify weights, got string: %s' %
                            input_entry)
-        file_pattern, weight = input_entry[:2]
-        datasources.append(
-            datasource.SimpleDataSource.Params().Set(file_pattern=file_pattern))
 
-        # This is essentially a bug fix, but we only enable it based on this
-        #  param to maintain backward compatibility.
-        if not p.all_zero_source_id_without_within_batch_mixing:
-          # SimpleDataSource will output source_id=0. We use source_id_offset
-          # to correct this.
-          datasources[-1].Set(source_id_offset=source_id)
+      if p.batch_mixing_partition_boundaries is not None:
+        datasources, weights = PartitionFilePatternsIntoDataSources(p)
 
-        weights.append(weight)
-        bprop_variable_filter = input_entry[2] if len(input_entry) > 2 else ''
-        bprop_variable_filters.append(bprop_variable_filter)
-      ds = datasource.CrossBatchMixingDataSource.Params().Set(
-          sub=datasources,
-          weights=weights,
-          bprop_variable_filters=bprop_variable_filters)
+        ds = datasource.CrossBatchMixingDataSource.Params().Set(
+            sub=datasources, weights=weights)
+
+      else:
+        datasources = []
+        weights = []
+        bprop_variable_filters = []
+
+        for source_id, input_entry in enumerate(p.file_pattern):
+          file_pattern, weight = input_entry[:2]
+          datasources.append(datasource.SimpleDataSource.Params().Set(
+              file_pattern=file_pattern))
+
+          MaybeOffsetDataSourceId(datasources[-1], p, source_id)
+
+          weights.append(weight)
+          bprop_variable_filter = input_entry[2] if len(input_entry) > 2 else ''
+          bprop_variable_filters.append(bprop_variable_filter)
+
+        ds = datasource.CrossBatchMixingDataSource.Params().Set(
+            sub=datasources,
+            weights=weights,
+            bprop_variable_filters=bprop_variable_filters)
   else:
     raise ValueError('Cannot parse p.file_pattern into a datasource.')
 
@@ -1046,6 +1130,14 @@ class BaseInputGeneratorFromFiles(BaseInputGenerator):
         ' is a list of file patterns with weights. Note: without mixing, all'
         ' source_id values for records will be set to 0 unless '
         'all_zero_source_id_without_within_batch_mixing is set to False.')
+    p.Define(
+        'batch_mixing_partition_boundaries', None,
+        'Must be either None or a list of indices into the file_pattern. '
+        'If set, indicies are interpreted as the begining of a partition. E.g. '
+        '[2, 5, 9] will partition file_pattern into [:,2], [2:5], [5:9], and '
+        '[9:]. The patterns within each partition will have '
+        'within_batch_mixing. There will be no batch mixining between '
+        'partitions.')
     p.Define(
         'all_zero_source_id_without_within_batch_mixing', True,
         'When set (by default) and use_within_batch_mixing is false, all '
@@ -1290,6 +1382,11 @@ class BaseSequenceInputGenerator(BaseInputGeneratorFromFiles):
         .format(infeed_bucket_batch_limit, self.cluster.num_splits_per_client,
                 p.bucket_batch_limit))
     return infeed_bucket_batch_limit
+
+  def Initialize(self, sess: tf.Session = None):
+    super().Initialize(sess)
+    for tokenizer in self.tokenizer_dict.values():
+      tokenizer.Initialize(sess)
 
   def InfeedBatchSize(self):
     """Returns the batch size of one infeed pipeline.

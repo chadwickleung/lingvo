@@ -31,13 +31,14 @@ from typing import Optional, Sequence
 from absl import app
 from absl import flags
 from absl import logging
-# Required import to setup work units when running through XManager.
 from clu import platform
 import jax
-from jax import prng
 from lingvo.jax import eval as eval_lib
+from lingvo.jax import py_utils
 from lingvo.jax import train
 import tensorflow.compat.v2 as tf
+
+# Required import to setup work units when running through XManager.
 
 
 FLAGS = flags.FLAGS
@@ -61,6 +62,12 @@ flags.DEFINE_bool(
     'If suitable, will try to rely on persistence-based checkpointing rather '
     'than Flax-based checkpointing for SPMD models.')
 flags.DEFINE_string(
+    'checkpoint_todelete_subdir', None,
+    'If set, checkpoints to be deleted will be only renamed into a '
+    'subdirectory with the provided string. Otherwise, they will be directly '
+    'deleted from the file system. Useful if checkpoint deletion is time '
+    'consuming. By default, delete the checkpoint assets.')
+flags.DEFINE_string(
     'restore_checkpoint_dir', None,
     'If set, the directory from which to restore checkpoint. If unset, the '
     'script tries to restore from --job_log_dir\'s `checkpoints` subdirectory.')
@@ -80,17 +87,6 @@ flags.DEFINE_integer(
 # Flags --jax_backend_target and --jax_xla_backend are available through JAX.
 
 
-def globally_use_rbg_prng_key() -> None:
-  logging.info('Globally use RngBitGenerator-based RNG: '
-               'Deterministic at the same compiler version and sharding;'
-               'Non-deterministic when compiler versions change')
-
-  def rbg_key(seed: int):
-    return prng.seed_with_impl(prng.rbg_prng_impl, seed)
-
-  jax.random.PRNGKey = rbg_key
-
-
 def setup_jax(globally_use_hardware_rng: bool, jax_use_gda: bool,
               jax_backend_target: Optional[str],
               jax_xla_backend: Optional[str]) -> None:
@@ -99,8 +95,12 @@ def setup_jax(globally_use_hardware_rng: bool, jax_use_gda: bool,
   # it unavailable to JAX.
   tf.config.experimental.set_visible_devices([], 'GPU')
   if globally_use_hardware_rng:
-    jax.config.update('jax_enable_custom_prng', True)
-    globally_use_rbg_prng_key()
+    py_utils.set_globally_use_rbg_prng_key()
+
+  # We use xmap only with SPMD.
+  jax.config.update('experimental_xmap_spmd_lowering', True)
+  # Use the manual partitioning lowering of xmap to avoid vectorization.
+  jax.config.update('experimental_xmap_spmd_lowering_manual', True)
 
   if jax_use_gda:
     logging.info('Using JAX GSDA for pjit and checkpointing')
@@ -142,7 +142,7 @@ def main(argv: Sequence[str]) -> None:
 
   # Start jax.profiler for Tensorboard and profiling in open source.
   if FLAGS.jax_profiler_port is not None:
-    server = jax.profiler.start_server(FLAGS.jax_profiler_port)
+    server = jax.profiler.start_server(FLAGS.jax_profiler_port)  # pylint:disable=unused-variable
   if FLAGS.mode == 'train':
     train.train_and_evaluate(
         model_name=FLAGS.model,
@@ -152,7 +152,8 @@ def main(argv: Sequence[str]) -> None:
         .maybe_use_persistence_checkpointing,
         restore_checkpoint_dir=FLAGS.restore_checkpoint_dir,
         restore_checkpoint_step=FLAGS.restore_checkpoint_step,
-        eval_on_test=FLAGS.eval_on_test)
+        eval_on_test=FLAGS.eval_on_test,
+        checkpoint_todelete_subdir=FLAGS.checkpoint_todelete_subdir)
   elif FLAGS.mode == 'eval':
     eval_lib.evaluate(
         model_name=FLAGS.model,

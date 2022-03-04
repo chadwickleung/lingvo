@@ -18,7 +18,6 @@
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
-from jax import test_util
 import jax.numpy as jnp
 from lingvo.core import attention_util
 from lingvo.jax import base_layer
@@ -30,8 +29,7 @@ import tensorflow as tf
 to_np = test_utils.to_np
 
 
-@test_util.with_config(jax_numpy_rank_promotion='allow')
-class NgrammerTest(test_util.JaxTestCase):
+class NgrammerTest(test_utils.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -85,21 +83,10 @@ class NgrammerTest(test_util.JaxTestCase):
     )
     vq_layer = vq_layer_p.Instantiate()
     initial_vars = vq_layer.instantiate_variables(init_key)
-    global_step = jnp.array(0, dtype=jnp.uint64)
-    prng_key, compute_key = jax.random.split(prng_key)
 
-    # comppute vq function is fully functional.
-    @jax.jit
-    def compute_vq(theta, prng_key, global_step, inputs):
-      with base_layer.JaxContext.new_context(
-          prng_key=prng_key, global_step=global_step) as j_context:
-        j_context.bind(vq_layer, {}, [base_layer.SCOPE_VARS])
-        per_step_prng_key = jax.random.fold_in(prng_key, global_step)
-        base_layer.reset_prng_key(per_step_prng_key, global_step)
-        output = vq_layer.fprop(theta, inputs)
-        return output
+    jax_dists, _ = test_utils.apply(vq_layer, initial_vars, vq_layer.fprop,
+                                    inputs)
 
-    jax_dists, _ = compute_vq(initial_vars, compute_key, global_step, inputs)
     # Now run TF based computation.
     tf_vq_layer_p = attention_util.KMeansClusteringForAtten.Params().Set(
         name='tf_vq_layer',
@@ -145,22 +132,10 @@ class NgrammerTest(test_util.JaxTestCase):
     )
     ngrammer_layer = ngrammer_layer_p.Instantiate()
     initial_vars = ngrammer_layer.instantiate_variables(init_key)
-    global_step = jnp.array(0, dtype=jnp.uint64)
-    prng_key, compute_key = jax.random.split(prng_key)
 
-    # compute ngrams function is fully functional.
-    @jax.jit
-    def compute_ngrams(theta, prng_key, global_step, inputs, input_embs):
-      with base_layer.JaxContext.new_context(
-          prng_key=prng_key, global_step=global_step) as j_context:
-        j_context.bind(ngrammer_layer, {}, [base_layer.SCOPE_VARS])
-        per_step_prng_key = jax.random.fold_in(prng_key, global_step)
-        base_layer.reset_prng_key(per_step_prng_key, global_step)
-        output = ngrammer_layer.fprop(theta, inputs, input_embs, paddings)
-        return output
-
-    ngram_embs = compute_ngrams(initial_vars, compute_key, global_step, inputs,
-                                input_embs)
+    ngram_embs = test_utils.apply(ngrammer_layer, initial_vars,
+                                  ngrammer_layer.fprop, inputs, input_embs,
+                                  paddings)
     ngram_embs = np.reshape(ngram_embs,
                             [batch_size, seq_len, num_heads, dim_per_head])
     input_embs = np.reshape(input_embs,
@@ -171,18 +146,23 @@ class NgrammerTest(test_util.JaxTestCase):
                                                    unigram_vocab_size)
       ngram_ids_per_head *= (i + 1)
       ngram_ids_per_head += (i + 1)
-      ngram_embs_expected = ngrammer_layer.ngram_table[i].fprop(
-          initial_vars.ngram_table[i], np.reshape(ngram_ids_per_head, [-1]))
-      ngram_embs_expected = ngrammer_layer.ngram_layer_norm[i].fprop(
-          initial_vars.ngram_layer_norm[i], ngram_embs_expected)
+      ngram_embs_expected = test_utils.apply(
+          ngrammer_layer.ngram_table[i], initial_vars.ngram_table[i],
+          ngrammer_layer.ngram_table[i].fprop,
+          np.reshape(ngram_ids_per_head, [-1]))
+      ngram_embs_expected = test_utils.apply(
+          ngrammer_layer.ngram_layer_norm[i], initial_vars.ngram_layer_norm[i],
+          ngrammer_layer.ngram_layer_norm[i].fprop, ngram_embs_expected)
       ngram_embs_expected = jnp.reshape(ngram_embs_expected,
                                         [batch_size, seq_len, ngram_emb_dim])
       ngram_embs_expected *= (1 - paddings[:, :, np.newaxis])
       if concat_ngrams:
         ngram_embs_slice = ngram_embs[:, :, i, -ngram_emb_dim:]
       else:
-        input_embs_ln = ngrammer_layer.emb_layer_norm[i].fprop(
-            initial_vars.emb_layer_norm[i], input_embs[:, :, i, :])
+        input_embs_ln = test_utils.apply(ngrammer_layer.emb_layer_norm[i],
+                                         initial_vars.emb_layer_norm[i],
+                                         ngrammer_layer.emb_layer_norm[i].fprop,
+                                         input_embs[:, :, i, :])
         ngram_embs_slice = ngram_embs[:, :, i, :] - input_embs_ln
       self.assertAllClose(to_np(ngram_embs_slice), to_np(ngram_embs_expected))
 
@@ -219,21 +199,10 @@ class NgrammerTest(test_util.JaxTestCase):
     )
     ngrammer_layer = ngrammer_layer_p.Instantiate()
     initial_vars = ngrammer_layer.instantiate_variables(init_key)
-    global_step = jnp.array(0, dtype=jnp.uint64)
-    prng_key, compute_key = jax.random.split(prng_key)
 
-    # compute ngrams function is fully functional.
-    @jax.jit
-    def compute_ngrams(theta, prng_key, global_step, inputs, input_embs):
-      with base_layer.JaxContext.new_context(
-          prng_key=prng_key, global_step=global_step):
-        per_step_prng_key = jax.random.fold_in(prng_key, global_step)
-        base_layer.reset_prng_key(per_step_prng_key, global_step)
-        output = ngrammer_layer.fprop(theta, inputs, input_embs, paddings)
-        return output
-
-    ngram_embs = compute_ngrams(initial_vars, compute_key, global_step, inputs,
-                                input_embs)
+    ngram_embs = test_utils.apply(ngrammer_layer, initial_vars,
+                                  ngrammer_layer.fprop, inputs, input_embs,
+                                  paddings)
     ngram_embs = np.reshape(ngram_embs,
                             [batch_size, seq_len, num_heads, dim_per_head])
     input_embs = np.reshape(input_embs,
@@ -244,18 +213,23 @@ class NgrammerTest(test_util.JaxTestCase):
                                                    unigram_vocab_size)
       ngram_ids_per_head *= (i + 1)
       ngram_ids_per_head += (i + 1)
-      ngram_embs_expected = ngrammer_layer.ngram_table[i].fprop(
-          initial_vars.ngram_table[i], np.reshape(ngram_ids_per_head, [-1]))
-      ngram_embs_expected = ngrammer_layer.ngram_layer_norm[i].fprop(
-          initial_vars.ngram_layer_norm[i], ngram_embs_expected)
+      ngram_embs_expected = test_utils.apply(
+          ngrammer_layer.ngram_table[i], initial_vars.ngram_table[i],
+          ngrammer_layer.ngram_table[i].fprop,
+          np.reshape(ngram_ids_per_head, [-1]))
+      ngram_embs_expected = test_utils.apply(
+          ngrammer_layer.ngram_layer_norm[i], initial_vars.ngram_layer_norm[i],
+          ngrammer_layer.ngram_layer_norm[i].fprop, ngram_embs_expected)
       ngram_embs_expected = jnp.reshape(ngram_embs_expected,
                                         [batch_size, seq_len, ngram_emb_dim])
       ngram_embs_expected *= (1 - paddings[:, :, np.newaxis])
       if concat_ngrams:
         ngram_embs_slice = ngram_embs[:, :, i, -ngram_emb_dim:]
       else:
-        input_embs_ln = ngrammer_layer.emb_layer_norm[i].fprop(
-            initial_vars.emb_layer_norm[i], input_embs[:, :, i, :])
+        input_embs_ln = test_utils.apply(ngrammer_layer.emb_layer_norm[i],
+                                         initial_vars.emb_layer_norm[i],
+                                         ngrammer_layer.emb_layer_norm[i].fprop,
+                                         input_embs[:, :, i, :])
         ngram_embs_slice = ngram_embs[:, :, i, :] - input_embs_ln
       self.assertAllClose(to_np(ngram_embs_slice), to_np(ngram_embs_expected))
 
@@ -295,15 +269,18 @@ class NgrammerTest(test_util.JaxTestCase):
 
     # compute vq ngrams function is fully functional.
     context_params = base_layer.JaxContext.Params().Set(do_eval=True)
+
     @jax.jit
     def compute_vq_ngrams(theta, prng_key, global_step, input_embs):
       with base_layer.JaxContext.new_context(
-          params=context_params, prng_key=prng_key, global_step=global_step):
+          params=context_params, prng_key=prng_key,
+          global_step=global_step) as jax_context:
         per_step_prng_key = jax.random.fold_in(prng_key, global_step)
         base_layer.reset_prng_key(per_step_prng_key, global_step)
-        output = vq_ngrammer_layer.fprop(theta, None, input_embs, paddings)
-        distances, _ = vq_ngrammer_layer.vq_layer.fprop(theta.vq_layer,
-                                                        input_embs)
+        jax_context.bind(vq_ngrammer_layer,
+                         vq_ngrammer_layer.vars_to_flax_vars(theta))
+        output = vq_ngrammer_layer.fprop(None, input_embs, paddings)
+        distances, _ = vq_ngrammer_layer.vq_layer.fprop(input_embs)
         return output, distances
 
     ngram_embs, dists = compute_vq_ngrams(initial_vars, compute_key,
@@ -321,21 +298,27 @@ class NgrammerTest(test_util.JaxTestCase):
                                                    num_clusters)
       ngram_ids_per_head *= (i + 1)
       ngram_ids_per_head += (i + 1)
-      ngram_embs_expected = vq_ngrammer_layer.ngram_layer.ngram_table[i].fprop(
+      ngram_embs_expected = test_utils.apply(
+          vq_ngrammer_layer.ngram_layer.ngram_table[i],
           initial_vars.ngram_layer.ngram_table[i],
+          vq_ngrammer_layer.ngram_layer.ngram_table[i].fprop,
           np.reshape(ngram_ids_per_head, [-1]))
-      ngram_embs_expected = (
-          vq_ngrammer_layer.ngram_layer.ngram_layer_norm[i].fprop(
-              initial_vars.ngram_layer.ngram_layer_norm[i],
-              ngram_embs_expected))
+      ngram_embs_expected = test_utils.apply(
+          vq_ngrammer_layer.ngram_layer.ngram_layer_norm[i],
+          initial_vars.ngram_layer.ngram_layer_norm[i],
+          vq_ngrammer_layer.ngram_layer.ngram_layer_norm[i].fprop,
+          ngram_embs_expected)
       ngram_embs_expected = jnp.reshape(ngram_embs_expected,
                                         [batch_size, seq_len, ngram_emb_dim])
       ngram_embs_expected *= (1 - paddings[:, :, np.newaxis])
       if concat_ngrams:
         ngram_embs_slice = ngram_embs[:, :, i, -ngram_emb_dim:]
       else:
-        input_embs_ln = vq_ngrammer_layer.ngram_layer.emb_layer_norm[i].fprop(
-            initial_vars.ngram_layer.emb_layer_norm[i], input_embs[:, :, i, :])
+        input_embs_ln = test_utils.apply(
+            vq_ngrammer_layer.ngram_layer.emb_layer_norm[i],
+            initial_vars.ngram_layer.emb_layer_norm[i],
+            vq_ngrammer_layer.ngram_layer.emb_layer_norm[i].fprop,
+            input_embs[:, :, i, :])
         ngram_embs_slice = ngram_embs[:, :, i, :] - input_embs_ln
       self.assertAllClose(to_np(ngram_embs_slice), to_np(ngram_embs_expected))
 

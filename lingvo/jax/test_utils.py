@@ -18,7 +18,10 @@
 from typing import Any, Optional
 
 from absl import flags
+from absl.testing import parameterized
+import jax
 from jax import numpy as jnp
+from lingvo.jax import base_layer
 from lingvo.jax import py_utils
 import numpy as np
 import tensorflow.compat.v2 as tf
@@ -26,6 +29,40 @@ import tensorflow.compat.v2 as tf
 FLAGS = flags.FLAGS
 JTensor = jnp.ndarray
 NestedMap = py_utils.NestedMap
+
+
+_dtype = lambda x: getattr(x, 'dtype', None) or np.asarray(x).dtype
+
+
+class TestCase(parameterized.TestCase):
+  """Test method for lingvo tests."""
+
+  def assertAllClose(self,
+                     x,
+                     y,
+                     check_dtypes=True,
+                     rtol=1E-5,
+                     atol=1E-5,
+                     **kwargs):
+    """Wrapper for np.testing.assert_allclose()."""
+    x = np.asarray(x)
+    y = np.asarray(y)
+    if check_dtypes:
+      self.assertDtypesMatch(x, y)
+    np.testing.assert_allclose(x, y, rtol=rtol, atol=atol, **kwargs)
+
+  def assertArraysEqual(self, x, y, check_dtypes=True, **kwargs):
+    """Wrapper for np.testing.assert_array_equal()."""
+    x = np.asarray(x)
+    y = np.asarray(y)
+    if check_dtypes:
+      self.assertDtypesMatch(x, y)
+    np.testing.assert_array_equal(x, y, **kwargs)
+
+  def assertDtypesMatch(self, x, y):
+    self.assertEqual(
+        jax.dtypes.canonicalize_dtype(_dtype(x)),
+        jax.dtypes.canonicalize_dtype(_dtype(y)))
 
 
 def to_np(x: JTensor) -> np.ndarray:
@@ -72,6 +109,16 @@ def to_tf_nmap(x_nmap: NestedMap) -> NestedMap:
       assert 'dtype not supported yet'
 
   return tf.nest.map_structure(to_tf, x_nmap)
+
+
+def apply(layer, layer_vars, method, *args, context_p=None, seed=123, **kwags):
+  prng_key = jax.random.PRNGKey(seed=seed)
+  with base_layer.JaxContext.new_context(
+      params=context_p,
+      prng_key=prng_key,
+      global_step=jnp.array(0, dtype=jnp.uint32)) as jax_context:
+    jax_context.bind(layer, layer.vars_to_flax_vars(layer_vars))
+    return method(*args, **kwags)
 
 
 def replace_jax_transformer_ffwd_vars_to_tf(

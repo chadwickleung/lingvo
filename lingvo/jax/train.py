@@ -42,6 +42,8 @@ from lingvo.jax import checkpoints
 CheckpointType = checkpoint_pb2.CheckpointType
 InstantiableParams = py_utils.InstantiableParams
 
+_N_STEPS_WARMUP_LOGGING = 5
+
 
 def _write_params_file(model_config: base_model_params.BaseModelParams,
                        job_log_dir: str) -> None:
@@ -101,11 +103,9 @@ def _parse_duration(
 
 
 def _create_checkpoint_manager(
-    model_name: str,
-    task_p: InstantiableParams,
-    job_log_dir: str,
+    model_name: str, task_p: InstantiableParams, job_log_dir: str,
     checkpoint_type: CheckpointType,
-) -> checkpoint_managers.CheckpointManager:
+    todelete_subdir: Optional[str]) -> checkpoint_managers.CheckpointManager:
   """Creates a checkpoint manager."""
   checkpoint_dir = _checkpoint_dir(job_log_dir)
   train_p = task_p.train
@@ -118,15 +118,32 @@ def _create_checkpoint_manager(
       checkpoint_type=checkpoint_type,
       max_to_keep=max_to_keep,
       save_interval_steps=save_interval_steps,
-      keep_interval_timedelta=keep_interval_timedelta)
+      keep_interval_timedelta=keep_interval_timedelta,
+      todelete_subdir=todelete_subdir)
 
 
-def train_and_evaluate(model_name: str, job_log_dir: Optional[str],
-                       multi_host_checkpointing: Optional[bool],
-                       maybe_use_persistence_checkpointing: bool,
-                       restore_checkpoint_dir: Optional[str],
-                       restore_checkpoint_step: Optional[int],
-                       eval_on_test: Optional[bool]) -> None:
+def _update_latest_model_step(train_input_p: InstantiableParams,
+                              initial_global_step: int,
+                              eval_interval_steps: int) -> None:
+  """Updates `train_input_p` in place its latest model step."""
+  if not hasattr(train_input_p, 'deterministic_input_start_index'):
+    return
+  dp = train_input_p.deterministic_input_start_index
+  # Every `eval_interval_steps` step, we take one extra example from the
+  # training input to run eval.
+  initial_global_step += initial_global_step // eval_interval_steps
+  dp._latest_model_step = initial_global_step  # pylint: disable=protected-access
+
+
+def train_and_evaluate(
+    model_name: str,
+    job_log_dir: Optional[str],
+    multi_host_checkpointing: Optional[bool],
+    maybe_use_persistence_checkpointing: bool,
+    restore_checkpoint_dir: Optional[str],
+    restore_checkpoint_step: Optional[int],
+    eval_on_test: Optional[bool],
+    checkpoint_todelete_subdir: Optional[str] = None) -> None:
   """Runs the training and evaluation loop.
 
   Args:
@@ -141,34 +158,41 @@ def train_and_evaluate(model_name: str, job_log_dir: Optional[str],
     restore_checkpoint_step: If set, the checkpoint step to restore. If unset,
       try to restore from the latest checkpoint if any.
     eval_on_test: Whether to eval on test as a part of the training loop.
+    checkpoint_todelete_subdir: If set, checkpoints to be deleted will be only
+      renamed into the provided subdirectory. Otherwise, they will be directly
+      deleted from the file system. This is useful, when checkpoint deletion is
+      time consuming.
   """
   model_config = model_utils.get_model(model_name)()
   _write_params_file(model_config, job_log_dir)
   task_p = model_config.task()
 
-  for inp in model_config.datasets():
+  input_p = model_config.datasets()
+  # Note that we modify input params below with runtime information, therefore
+  # model_config.dataset() should not be called again as it won't have the
+  # correct runtime information populated.
+  for inp in input_p:
     if not isinstance(inp, base_input.BaseInputParams):
       raise ValueError('Expecting BaseInputParams from datasets(), got: '
                        f'{inp.ToText()}')
     inp.num_infeed_hosts = jax.process_count()
     inp.infeed_host_index = jax.process_index()
-  train_input_p = [v for v in model_config.datasets() if v.is_training]
+  train_input_p = [v for v in input_p if v.is_training]
   if len(train_input_p) != 1:
     raise ValueError(
         f'Expecting exactly one training split. Got `{len(train_input_p)}`.')
   train_input_p = train_input_p[0]
+  logging.info('train_input_p=%s', train_input_p.ToText())
   eval_input_p = None
   if eval_on_test:
-    eval_input_p = [v for v in model_config.datasets() if not v.is_training]
-  if 'bucket_batch_limit' in train_input_p:
-    logging.info('train_input_p.bucket_batch_limit: %s',
-                 train_input_p.bucket_batch_limit)
+    eval_input_p = [v for v in input_p if not v.is_training]
 
   checkpoint_type = checkpoints.retrieve_checkpoint_type(
       multi_host_checkpointing, maybe_use_persistence_checkpointing, task_p)
 
   checkpoint_manager = _create_checkpoint_manager(model_name, task_p,
-                                                  job_log_dir, checkpoint_type)
+                                                  job_log_dir, checkpoint_type,
+                                                  checkpoint_todelete_subdir)
 
   if task_p.model.device_mesh is not None:
     train_and_evaluate_spmd_model(task_p, train_input_p, job_log_dir,
@@ -209,7 +233,6 @@ def train_and_evaluate_pmap(
         'jax.pmap does not yet support GlobalDeviceArray.')
   jax_task = task_p.Instantiate()
 
-  train_input_pipeline = train_input_p.Instantiate()
   if eval_input_p is not None:
     eval_input_pipelines = [input_p.Instantiate() for input_p in eval_input_p]
 
@@ -226,6 +249,14 @@ def train_and_evaluate_pmap(
       step=restore_checkpoint_step)
   total_num_params = jax_task.model.total_num_vars
   replicated_model_states = trainer_lib.replicate_model_state(model_states)
+
+  train_p = task_p.train
+  initial_global_step = int(jax.device_get(replicated_model_states.step)[0])
+  logging.info('Model initial global_step=%d', initial_global_step)
+  _update_latest_model_step(train_input_p, initial_global_step,
+                            train_p.eval_interval_steps)
+  train_input_pipeline = train_input_p.Instantiate()
+
   # Unreplicated model states are not needed anymore at that point.
   del model_states
 
@@ -249,12 +280,12 @@ def train_and_evaluate_pmap(
         data_parallel_axis_name='batch',
         fprop_dtype=fprop_dtype)
 
-  def eval_step(mdl_vars, prng_key, global_step, inputs):
+  def eval_step(states, prng_key, inputs):
+    eval_states = trainer_lib.train_state_for_eval_step(states)
     return trainer_lib.eval_step_single_learner(
         jax_task,
-        mdl_vars,
+        eval_states,
         prng_key,
-        global_step,
         inputs,
         data_parallel_axis_name='batch',
         fprop_dtype=fprop_dtype)
@@ -268,8 +299,6 @@ def train_and_evaluate_pmap(
 
   p_train_step = jax.pmap(train_step, donate_argnums=(0,), axis_name='batch')
   p_eval_step = jax.pmap(eval_step, axis_name='batch')
-
-  train_p = task_p.train
 
   logging.info('Training loop starting...')
   summary_base_dir = os.path.join(job_log_dir, 'summaries')
@@ -327,7 +356,7 @@ def train_and_evaluate_pmap(
           checkpoints.save_checkpoint(replicated_model_states, checkpoint_dir)
         checkpoint_manager.save_metadata(global_step_id=step_i)
 
-      if step_i <= 5:
+      if step_i <= _N_STEPS_WARMUP_LOGGING:
         logging.info('step=`%d`: Retrieving model inputs.', step_i)
       logging.debug('  Retrieving inputs.')
       model_inputs = tf.nest.map_structure(py_utils.reshard,
@@ -371,10 +400,8 @@ def train_and_evaluate_pmap(
         eval_inputs = train_input_pipeline.get_next()
         logging.debug('  Retrieved eval model_inputs.')
         logging.debug('  Performing eval_step() runs on training split.')
-        eval_step_fn = functools.partial(p_eval_step,
-                                         replicated_model_states.mdl_vars,
-                                         eval_prng_seed,
-                                         replicated_model_states.step)
+        eval_step_fn = functools.partial(p_eval_step, replicated_model_states,
+                                         eval_prng_seed)
         loss, mean_metrics, summary_tensors = model_utils.run_eval_one_step(
             eval_inputs, eval_step_fn, reshard_inputs=True)
         logging.debug('  Completed eval_step() runs on training split.')
@@ -430,7 +457,6 @@ def train_and_evaluate_spmd_model(
     eval_input_p: Optional list of params for the eval input pipelines.
   """
   logging.info('Using SPMD sharding for model parallelism.')
-  train_input_pipeline = train_input_p.Instantiate()
   model_p = task_p.model
 
   if eval_input_p is not None:
@@ -471,16 +497,17 @@ def train_and_evaluate_spmd_model(
     py_utils.sync_global_devices(f'checkpointer:makedirs:{checkpoint_dir}')
 
   logging.info('Retrieving model inputs for shape info.')
-  model_inputs_for_shape = train_input_pipeline.get_next()
+  train_input_for_shape = train_input_p.Instantiate()
+  model_inputs_for_shape = train_input_for_shape.get_next()
   inputs_shape = tf.nest.map_structure(py_utils.get_global_input_shape_dtype,
                                        model_inputs_for_shape)
 
   mesh_shape = model_p.device_mesh.shape
   device_mesh = mesh_utils.create_device_mesh(mesh_shape)
   logging.info('device_mesh: %s', device_mesh)
-  # TODO(zhangqiaorjc): maps.mesh should yield Mesh.
+
   global_mesh = maps.Mesh(device_mesh, model_p.mesh_axis_names)
-  with maps.mesh(device_mesh, model_p.mesh_axis_names):
+  with global_mesh:
     (partitioned_train_state, train_state_pspecs, inputs_pspecs, train_step,
      eval_step, total_num_params) = trainer_lib.partition_spmd_model(
          task_p, init_key, inputs_shape)
@@ -499,6 +526,15 @@ def train_and_evaluate_spmd_model(
     if multi_host_checkpointing:
       py_utils.sync_global_devices(f'checkpointer:restored:{checkpoint_dir}')
 
+    train_p = task_p.train
+    initial_global_step = int(
+        jax.device_get(
+            py_utils.maybe_unreplicate_gda(partitioned_train_state.step)))
+    logging.info('Model initial global_step=%d', initial_global_step)
+    _update_latest_model_step(train_input_p, initial_global_step,
+                              train_p.eval_interval_steps)
+    train_input_pipeline = train_input_p.Instantiate()
+
     # We do not fold in jax.process_index in contrast to the pmap version and
     # use a single global key instead to rely on pjit to split for different
     # replicas.
@@ -506,8 +542,6 @@ def train_and_evaluate_spmd_model(
     prng_key, train_key, eval_key = jax.random.split(prng_key, 3)
     logging.info('train prng_key: %s', train_key)
     logging.info('eval prng_key: %s', eval_key)
-
-    train_p = task_p.train
 
     logging.info('Training loop starting...')
     summary_base_dir = os.path.join(job_log_dir, 'summaries')
@@ -588,21 +622,23 @@ def train_and_evaluate_spmd_model(
                 f'checkpointer:saved:{checkpoint_dir}:step-{step_i}')
 
         # Get new model inputs
-        if step_i <= 5:
+        if step_i <= _N_STEPS_WARMUP_LOGGING:
           logging.info('step=`%d`: Retrieving model inputs.', step_i)
         logging.debug('  Retrieving inputs.')
         model_inputs = train_input_pipeline.get_next()
 
         if jax.config.jax_parallel_functions_output_gda:
-          start = time.time()
+          if step_i <= _N_STEPS_WARMUP_LOGGING:
+            start = time.time()
           py_utils.assert_same_shape_and_dtype(
               inputs_shape,
               tf.nest.map_structure(py_utils.get_global_input_shape_dtype,
                                     model_inputs))
           model_inputs = py_utils.create_gda(model_inputs, inputs_shape,
                                              global_mesh, inputs_pspecs)
-          logging.info('GDA train batch input creation time %s',
-                       time.time() - start)
+          if step_i <= _N_STEPS_WARMUP_LOGGING:
+            logging.info('GDA train batch input creation time %s',
+                         time.time() - start)
 
         logging.debug('  Retrieved inputs.')
 
@@ -650,10 +686,10 @@ def train_and_evaluate_spmd_model(
           logging.debug('  Retrieved eval model_inputs.')
           logging.debug('  Performing eval_step() runs on training split.')
 
-          eval_step_fn = functools.partial(eval_step,
-                                           partitioned_train_state.mdl_vars,
-                                           eval_key,
-                                           partitioned_train_state.step)
+          eval_step_fn = functools.partial(
+              eval_step,
+              trainer_lib.train_state_for_eval_step(partitioned_train_state),
+              eval_key)
           loss, mean_metrics, summary_tensors = model_utils.run_eval_one_step(
               eval_inputs, eval_step_fn, reshard_inputs=False)
           logging.debug('  Completed eval_step() runs on training split.')

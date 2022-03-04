@@ -67,8 +67,9 @@ class SingleShardEmbedding(base_layer.BaseLayer):
             device_mesh=p.device_mesh,
             tensor_split_dims_mapping=wp.wt))
 
-  def fprop(self, theta: NestedMap, ids: JTensor) -> JTensor:
+  def fprop(self, ids: JTensor) -> JTensor:
     p = self.params
+    theta = self.local_theta()
     if p.lookup_style == 'index':
       embs = jnp.asarray(theta.emb_var)[(ids,)]
     elif p.lookup_style == 'matmul':
@@ -94,6 +95,7 @@ class SingleShardFullSoftmax(base_layer.BaseLayer):
     p.Define('soft_cap_logits', 0.,
              'If not None logits are soft capped to this value.')
     p.Define('bi_tempered_loss', None, 'If not None applies bi-tempered loss.')
+    p.Define('label_smoothing_prob', 0.0, 'Label smoothing probability.')
     return p
 
   def __init__(self, params: InstantiableParams) -> None:
@@ -111,12 +113,10 @@ class SingleShardFullSoftmax(base_layer.BaseLayer):
     if p.bi_tempered_loss:
       self.create_child('bi_tempered_loss', p.bi_tempered_loss)
 
-  def get_logits(self, theta: NestedMap, inputs: JTensor) -> JTensor:
+  def get_logits(self, inputs: JTensor) -> JTensor:
     """Returns logits given the inputs with an option to soft cap it.
 
     Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
       inputs: a single JTensor with shape [..., input_dim].
 
     Returns:
@@ -124,7 +124,7 @@ class SingleShardFullSoftmax(base_layer.BaseLayer):
     """
     p = self.params
     # Compute logits
-    logits = self.logits_ffn.fprop(theta.logits_ffn, inputs)
+    logits = self.logits_ffn.fprop(inputs)
 
     # Soft cap logits if applicable
     if p.soft_cap_logits:
@@ -132,7 +132,6 @@ class SingleShardFullSoftmax(base_layer.BaseLayer):
     return logits
 
   def fprop(self,
-            theta: NestedMap,
             inputs: JTensor,
             class_weights: JTensor,
             class_ids: Optional[JTensor] = None,
@@ -140,8 +139,6 @@ class SingleShardFullSoftmax(base_layer.BaseLayer):
     """Computes logits, cross entropy etc.
 
     Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
       inputs: a single JTensor with shape [..., input_dim].
       class_weights: a JTensor with shape [..., 1] containing the weights for
         each target word.
@@ -170,7 +167,7 @@ class SingleShardFullSoftmax(base_layer.BaseLayer):
 
     # Compute logits
     inputs_dtype = inputs.dtype
-    logits = self.get_logits(theta, inputs)
+    logits = self.get_logits(inputs)
     # We perform softmax in float32 to improve stability.
     logits = logits.astype(jnp.float32)
     log_probs = jax.nn.log_softmax(logits)
@@ -178,6 +175,15 @@ class SingleShardFullSoftmax(base_layer.BaseLayer):
     if class_probabilities is None:
       class_probabilities = jax.nn.one_hot(
           jnp.squeeze(class_ids, axis=-1), p.num_classes)
+      if p.label_smoothing_prob > 0.0:
+        # Label smoothing reduce the probability of the label from 1 to
+        # 1 - label_smoothing_prob, and redistribute label_smoothing_prob to the
+        # rest of num_classes - 1 classes where each class has a probability of
+        # label_smoothing_prob / (num_classes - 1).
+        other_prob = p.label_smoothing_prob / (p.num_classes - 1)
+        class_probabilities = (
+            (1.0 - p.label_smoothing_prob) * class_probabilities + other_prob *
+            (1.0 - class_probabilities)).astype(self.fprop_dtype)
       class_probabilities = jax.lax.stop_gradient(class_probabilities)
 
     if p.bi_tempered_loss is None:
@@ -218,10 +224,10 @@ class SingleShardSharedEmbeddingSoftmax(SingleShardFullSoftmax):
     ap.Define('emb_out_split_dims_mapping', None, 'Sharding of the emb output.')
     return p
 
-  def emb_lookup(self, theta: NestedMap, ids: JTensor) -> JTensor:
+  def emb_lookup(self, ids: JTensor) -> JTensor:
     p = self.params
     ap = p.activation_split_dims_mapping
-    emb_var = jnp.transpose(theta.logits_ffn.linear.w)
+    emb_var = jnp.transpose(self.logits_ffn.linear.local_theta().w)
     if p.lookup_style == 'index':
       embs = jnp.asarray(emb_var)[(ids,)]
     elif p.lookup_style == 'matmul':
@@ -286,23 +292,21 @@ class GShardSharedEmebeddingSoftmax(base_layer.BaseLayer):
         activation_split_dims_mapping=ap.Copy())
     self.create_child('embedding', emb_p)
 
-  def emb_lookup(self, theta: NestedMap, ids: JTensor) -> JTensor:
+  def emb_lookup(self, ids: JTensor) -> JTensor:
     p = self.params
     ap = p.activation_split_dims_mapping
     # BL -> BLV
     one_hot_ids = jax.nn.one_hot(ids, p.num_classes, dtype=self.fprop_dtype)
     # BLV,VH -> BLH
-    embs = linears.project_last_dim(one_hot_ids, theta.embedding.w)
+    embs = linears.project_last_dim(one_hot_ids, self.embedding.local_theta().w)
     embs = base_layer.maybe_shard(embs, ap.emb_out_split_dims_mapping,
                                   p.mesh_axis_names)
     return embs
 
-  def get_logits(self, theta: NestedMap, inputs: JTensor) -> JTensor:
+  def get_logits(self, inputs: JTensor) -> JTensor:
     """Returns logits given the inputs with an option to cap it.
 
     Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
       inputs: a single JTensor with shape [..., input_dim].
 
     Returns:
@@ -313,7 +317,7 @@ class GShardSharedEmebeddingSoftmax(base_layer.BaseLayer):
     # activations are scaled with 1/sqrt(input_dims)
     inputs *= (p.input_dims**-0.5)
     # VH -> HV
-    softmax_var = jnp.transpose(theta.embedding.w)
+    softmax_var = jnp.transpose(self.embedding.local_theta().w)
     # Compute logits:  BLH,HV -> BLV
     logits = linears.project_last_dim(inputs, softmax_var)
     logits = base_layer.maybe_shard(logits, ap.out, p.mesh_axis_names)
@@ -337,7 +341,6 @@ class GShardSharedEmebeddingSoftmax(base_layer.BaseLayer):
     return jnp.square(log_z)
 
   def fprop(self,
-            theta: NestedMap,
             inputs: JTensor,
             class_weights: JTensor,
             class_ids: Optional[JTensor] = None,
@@ -345,8 +348,6 @@ class GShardSharedEmebeddingSoftmax(base_layer.BaseLayer):
     """Computes logits, cross entropy etc.
 
     Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
       inputs: a single JTensor with shape [..., input_dim].
       class_weights: a JTensor with shape [..., 1] containing the weights for
         each target word.
@@ -375,7 +376,7 @@ class GShardSharedEmebeddingSoftmax(base_layer.BaseLayer):
 
     # Compute logits
     inputs_dtype = inputs.dtype
-    logits = self.get_logits(theta, inputs)
+    logits = self.get_logits(inputs)
     # We perform softmax in float32 to improve stability.
     logits = logits.astype(jnp.float32)
     log_probs = jax.nn.log_softmax(logits)
@@ -392,12 +393,16 @@ class GShardSharedEmebeddingSoftmax(base_layer.BaseLayer):
     # Compute total softmax for the entire sequence
     total_xent = jnp.sum(
         jnp.expand_dims(per_example_xent, axis=-1) * class_weights)
-    if p.use_tgt_labels_size_as_loss_denominator:
-      total_weight = jnp.sum(jnp.ones_like(class_weights))
-    else:
-      total_weight = jnp.sum(class_weights)
 
-    z_loss = jnp.sum(self.compute_z_loss(logits) * class_weights) / total_weight
+    total_weight = jnp.sum(class_weights)
+
+    if p.use_tgt_labels_size_as_loss_denominator:
+      loss_denominator = jnp.sum(jnp.ones_like(class_weights))
+    else:
+      loss_denominator = total_weight
+    avg_xent = (total_xent / loss_denominator).astype(inputs_dtype)
+    z_loss = (
+        jnp.sum(self.compute_z_loss(logits) * class_weights) / loss_denominator)
     z_loss *= p.z_loss_weight
     base_layer.add_summary('aux_z_loss', z_loss)
     aux_loss_ctx = py_utils.AuxLossContext.Current()
@@ -411,8 +416,12 @@ class GShardSharedEmebeddingSoftmax(base_layer.BaseLayer):
         per_example_argmax=per_example_argmax.astype(inputs_dtype),
         per_example_xent=per_example_xent.astype(inputs_dtype),
         total_xent=total_xent.astype(inputs_dtype),
-        total_weight=total_weight,
-        avg_xent=(total_xent / total_weight).astype(inputs_dtype))
+        # base_model.py _compute_xent_loss_helper uses avg_xent_weight if set,
+        # this helper is currently used by LanguageModel only, if we have
+        # EncoderDecoder model we will have to adjust weighting as well.
+        avg_xent_weight=loss_denominator,
+        avg_xent=avg_xent,
+        total_weight=total_weight)
 
     return output_nmap
 
@@ -433,14 +442,11 @@ class PositionalEmbedding(base_layer.BaseLayer):
     return p
 
   def fprop(self,
-            theta: NestedMap,
             seq_length: Optional[int] = None,
             position: Optional[JTensor] = None) -> JTensor:
     """Generates a JTensor of sinusoids with different frequencies.
 
     Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
       seq_length: Sequence length of the embeddings to be generated. This may be
         omitted if an explicit position JTensor is specified.
       position: Optional position JTensor which denotes the position of each
@@ -481,14 +487,11 @@ class RotaryPositionalEmbedding(PositionalEmbedding):
   """
 
   def fprop(self,
-            theta: NestedMap,
             inputs: JTensor,
             position: Optional[JTensor] = None) -> JTensor:
     """Generates a JTensor of sinusoids with different frequencies.
 
     Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
       inputs: The input sequence on which to apply the Rotary position
         embedding. Since rotary position embeddings are applied to query and
         keys after projection, it is assumed of shape [B, S, N, H].
@@ -527,14 +530,11 @@ class RotaryPositionalEmbedding(PositionalEmbedding):
     return jnp.concatenate([first_part, second_part], axis=-1)
 
   def extend_step(self,
-                  theta: NestedMap,
                   inputs: JTensor,
                   time_step: Optional[Union[int, JTensor]] = None) -> JTensor:
     """Generates a JTensor of sinusoids with different frequencies for a step.
 
     Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
       inputs: The input sequence on which to apply the Rotary position
         embedding. Since rotary position embeddings are applied to query and
         keys after projection, it is assumed of shape [B, N, H] or of shape [B,
@@ -558,7 +558,7 @@ class RotaryPositionalEmbedding(PositionalEmbedding):
     position = jax.lax.iota(dtype=jnp.int32, size=seq_length)
     position = time_step - jnp.flip(position)
     position = jnp.where(position < 0, jnp.zeros_like(position), position)
-    output = self.fprop(theta, inputs, position=position[jnp.newaxis, :])
+    output = self.fprop(inputs, position=position[jnp.newaxis, :])
     if len(inputs_shape) == 3:
       output = jnp.squeeze(output, axis=1)
     return output
@@ -589,14 +589,11 @@ class TrainablePositionalEmbedding(PositionalEmbedding):
             tensor_split_dims_mapping=wp.wt))
 
   def fprop(self,
-            theta: NestedMap,
             seq_length: Optional[int] = None,
             position: Optional[JTensor] = None) -> JTensor:
     """Generates a JTensor of embedding lookup result.
 
     Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
       seq_length: Sequence length of the embeddings to be generated. This may be
         omitted if an explicit position JTensor is specified.
       position: Optional position JTensor which denotes the position of each
@@ -608,6 +605,7 @@ class TrainablePositionalEmbedding(PositionalEmbedding):
       is specified, else of shape [1, seq_length, embedding_dim].
     """
     p = self.params
+    theta = self.local_theta()
     if position is None:
       assert seq_length is not None
       position = jnp.arange(seq_length, dtype=jnp.float32)[jnp.newaxis, :]

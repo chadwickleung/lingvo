@@ -456,7 +456,12 @@ class DecoderTest(DecoderTestCaseBase, parameterized.TestCase):
           stochastic_beam_search=py_utils.NestedMap(
               seed=tf.concat([seed, seed], axis=0),
               top_p_threshold=tf.concat([top_p_threshold, top_p_threshold],
-                                        axis=0)))
+                                        axis=0),
+              # IDs are all 1.
+              src_ids=tf.ones([batch_size * 2, src_seq_len], dtype=tf.int32),
+              # No paddings.
+              src_paddings=tf.zeros([batch_size * 2, src_seq_len],
+                                    dtype=tf.float32)))
 
       decode = dec.StochasticBeamSearchDecodeBiased(
           encoder_outputs, biased=True, stochastic=True)
@@ -519,7 +524,12 @@ class DecoderTest(DecoderTestCaseBase, parameterized.TestCase):
               # sampled at each time step, so the sampling becomes
               # deterministic. Note that stochastic beam search gets disabled if
               # top_p_threshold is actually 0.
-              top_p_threshold=tf.fill([batch_size], 0.001)))
+              top_p_threshold=tf.fill([batch_size], 0.001),
+              # IDs are all 1.
+              src_ids=tf.ones([batch_size, src_seq_len], dtype=tf.int32),
+              # No paddings.
+              src_paddings=tf.zeros([batch_size, src_seq_len],
+                                    dtype=tf.float32)))
 
       decode = dec.StochasticBeamSearchDecodeBiased(
           encoder_outputs, biased=True, stochastic=True)
@@ -569,7 +579,12 @@ class DecoderTest(DecoderTestCaseBase, parameterized.TestCase):
           stochastic_beam_search=py_utils.NestedMap(
               seed=tf.zeros([batch_size], dtype=tf.int32),
               # Stochastic beam search is disabled when top_p_threshold = 0.0.
-              top_p_threshold=tf.zeros([batch_size], dtype=dtype)))
+              top_p_threshold=tf.zeros([batch_size], dtype=dtype),
+              # IDs are all 1.
+              src_ids=tf.ones([batch_size, src_seq_len], dtype=tf.int32),
+              # No paddings.
+              src_paddings=tf.zeros([batch_size, src_seq_len],
+                                    dtype=tf.float32)))
 
       self.evaluate(tf.global_variables_initializer())
       decode_biased = dec.BeamSearchDecodeBiased(encoder_outputs.DeepCopy())
@@ -1591,7 +1606,7 @@ class TransformerDecoderTest(TransformerDecoderTestCaseBase,
                                    [17, 2, 2, 2, 2], [17, 1, 1, 16, 4]]
     expected_values['topk_lens'] = [5, 3, 2, 5]
     expected_values['topk_scores'] = [
-        -6.985453, -3.714368, -2.899912, -8.281981
+        -13.778075, -5.0416927, -4.368841, -12.5876465
     ]
     self._testSampleSequence(
         expected_values=expected_values,
@@ -1618,9 +1633,9 @@ class TransformerDecoderTest(TransformerDecoderTestCaseBase,
         5, 5, 3, 5, 3, 5, 5, 2, 2, 5, 5, 5, 5, 5, 5, 5
     ]
     expected_values['topk_scores'] = [
-        -6.9854527, -6.9844713, -4.0615487, -6.1022224, -3.7143679, -6.1905904,
-        -6.2516303, -2.4897237, -2.8999124, -6.6332593, -6.7769165, -7.70388,
-        -8.281982, -8.747569, -8.139862, -8.613339
+        -13.778075, -11.617228, -10.871767, -7.8519754, -5.0416927, -7.5232463,
+        -13.506006, -3.3935218, -4.368841, -15.106245, -8.279694, -11.427742,
+        -12.5876465, -10.190741, -11.02201, -13.237731
     ]
 
     self._testSampleSequence(

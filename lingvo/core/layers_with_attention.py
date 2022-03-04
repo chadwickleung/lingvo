@@ -176,6 +176,13 @@ class TransformerAttentionLayer(base_layer.BaseLayer):
         'pre_layer_norm', True, 'When True, layer norm is used before attention'
         'module, otherwise used after attention module which is consistent with'
         'Vaswani et al\'s paper')
+
+    p.Define('memory_augmentation', False,
+             'Augment attention with memory if True.')
+    p.Define(
+        'memory', None,
+        'Parameters for memory augmentation, currently only support '
+        'layers.LSHTaskWithMultiplierLayer.Params().')
     return p
 
   def __init__(self, params):
@@ -210,6 +217,14 @@ class TransformerAttentionLayer(base_layer.BaseLayer):
       params = p.residual_function.Copy()
       params.input_dim = p.atten_hidden_dim
       self.CreateChild('residual_function', params)
+
+    if p.memory_augmentation:
+      assert p.memory is not None
+      mem_params = p.memory.Copy()
+      # Make sure to override input and output dim.
+      mem_params.input_dim = p.source_dim
+      mem_params.output_dim = p.context_dim
+      self.CreateChild('lsh_mem', mem_params)
 
   def _InitAttention(self, atten_tpl):
     p = self.params
@@ -337,6 +352,8 @@ class TransformerAttentionLayer(base_layer.BaseLayer):
         atten_prob,
         [target_time, target_bs,
          self._GetSourceLength(source_paddings)])
+    if p.memory_augmentation:
+      h += self.lsh_mem.FProp(theta.lsh_mem, context_vecs - query_vec)
     return h, atten_prob
 
   def _FinishExtendStep(self,
@@ -556,6 +573,9 @@ class TransformerFeedForwardLayer(base_layer.BaseLayer):
     p.Define('add_skip_connection', True,
              'If True, add skip_connection from input to output.')
     p.Define('pre_layer_norm', True, 'Pre or post layer norm')
+    p.Define(
+        'primer_hybrid_norm', False,
+        'Add an additional post layer norm, requires pre_layer_norm=True.')
     p.Define('residual_droppath_prob', 0.0,
              'Probability at which we drop the entire residual path.')
     p.Define(
@@ -563,6 +583,12 @@ class TransformerFeedForwardLayer(base_layer.BaseLayer):
         'Boolean array to determine whether to use block diagonal matmul.')
     p.Define('num_blocks_pl', [], 'Int array for number of blocks for input '
              'and output.')
+    p.Define('memory_augmentation', False,
+             'Augment attention with memory if True.')
+    p.Define(
+        'memory', None,
+        'Parameters for memory augmentation, currently only support '
+        'layers.LSHTaskWithMultiplierLayer.Params().')
     return p
 
   @classmethod
@@ -608,9 +634,18 @@ class TransformerFeedForwardLayer(base_layer.BaseLayer):
 
     # Initialize feed-forward layer norm
     params = p.ln_tpl.Copy()
-    params.name = 'fflayer_ln'
     params.input_dim = p.input_dim
-    self.CreateChild('layer_norm', params)
+    if p.primer_hybrid_norm:
+      assert p.pre_layer_norm
+      pre_params = params.Copy()
+      pre_params.name = 'pre_fflayer_ln'
+      self.CreateChild('pre_layer_norm', pre_params)
+      post_params = params.Copy()
+      post_params.name = 'post_fflayer_ln'
+      self.CreateChild('post_layer_norm', post_params)
+    else:
+      params.name = 'fflayer_ln'
+      self.CreateChild('layer_norm', params)
 
     dropout_tpl = p.residual_dropout_tpl.Copy()
     dropout_tpl.keep_prob = (1.0 - p.residual_dropout_prob)
@@ -622,6 +657,17 @@ class TransformerFeedForwardLayer(base_layer.BaseLayer):
           name='residual_droppath',
           survival_prob=1.0 - p.residual_droppath_prob)
       self.CreateChild('residual_droppath', droppath_p)
+
+    if p.memory_augmentation:
+      assert p.memory is not None
+      mem_params = p.memory.Copy()
+      # Make sure to override input and output dim.
+      mem_params.input_dim = p.input_dim
+      if p.output_dim == 0:
+        mem_params.output_dim = p.input_dim
+      else:
+        mem_params.output_dim = p.output_dim
+      self.CreateChild('lsh_mem', mem_params)
 
   @property
   def output_dim(self):
@@ -647,17 +693,24 @@ class TransformerFeedForwardLayer(base_layer.BaseLayer):
     p = self.params
     with tf.name_scope(p.name):
       inputs = self._CastToFPropDtype(inputs)
-      if self.params.pre_layer_norm:
-        inputs_normalized = self.layer_norm.FProp(theta.layer_norm, inputs)
+      if p.pre_layer_norm:
+        if p.primer_hybrid_norm:
+          inputs_normalized = self.pre_layer_norm.FProp(theta.pre_layer_norm,
+                                                        inputs)
+        else:
+          inputs_normalized = self.layer_norm.FProp(theta.layer_norm, inputs)
       else:
         inputs_normalized = inputs
       if hasattr(self, 'res_proj_layer'):
         inputs = self.res_proj_layer.FProp(theta.res_proj_layer, inputs)
-      h = self.residual_dropout.FProp(
-          theta.residual_dropout,
-          self.fflayer.FProp(theta.fflayer, inputs_normalized,
-                             tf.expand_dims(paddings, -1)))
-      if self.params.add_skip_connection:
+      h = self.fflayer.FProp(theta.fflayer, inputs_normalized,
+                             tf.expand_dims(paddings, -1))
+      if p.primer_hybrid_norm:
+        h = self.post_layer_norm.FProp(theta.post_layer_norm, h)
+      if p.memory_augmentation:
+        h += self.lsh_mem.FProp(theta.lsh_mem, h - inputs)
+      h = self.residual_dropout.FProp(theta.residual_dropout, h)
+      if p.add_skip_connection:
         if p.residual_droppath_prob:
           h = self.residual_droppath.FProp(
               theta.residual_droppath,
@@ -665,8 +718,8 @@ class TransformerFeedForwardLayer(base_layer.BaseLayer):
               h,
           )
         else:
-          h = inputs + h * self.params.residual_weight
-      if not self.params.pre_layer_norm:
+          h = inputs + h * p.residual_weight
+      if not p.pre_layer_norm:
         h = self.layer_norm.FProp(theta.layer_norm, h)
       return h
 
