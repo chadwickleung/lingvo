@@ -2072,14 +2072,10 @@ def Top2GatingOnLogits(inputs,
                      tf.cast(mask_2, gates_without_top_1.dtype), name='gate2_einsum')
 
   # Confirmed: Unable to print useful stuffs
-  # Chadwick: Seems like the 2 indices are both 0 (the argmax)
   tf.logging.info('############################################################')
   tf.logging.info('############################################################')
   tf.logging.info(gate_1)
   tf.logging.info(gate_2)
-
-  # tf.logging.info(mask_2)
-  # tf.logging.info(gate_2)
 
   # Confirmed: is True
   if legacy_mtf_behavior:
